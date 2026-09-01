@@ -148,12 +148,14 @@ class TargetCreate(BaseModel):
     company_id: str
     target_code: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$")
     display_name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=500)
     mode: TargetMode
     binding_ids: list[str] = []
 
 
 class TargetUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
     mode: TargetMode | None = None
     enabled: bool | None = None
     binding_ids: list[str] | None = None
@@ -168,15 +170,29 @@ class TargetUpdate(BaseModel):
 
 class UserObjectCreate(BaseModel):
     account_name: str = Field(min_length=1, max_length=120)
+    routing_key: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$",
+    )
+    description: str = Field(default="", max_length=500)
 
 
 class UserObjectUpdate(BaseModel):
     account_name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    routing_key: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$",
+    )
     enabled: bool | None = None
     confirm: bool = False
 
     @model_validator(mode="after")
     def reject_explicit_nulls(self) -> UserObjectUpdate:
+        if "routing_key" in self.model_fields_set:
+            raise ValueError("routing_key is immutable")
         for field in self.model_fields_set:
             if getattr(self, field) is None:
                 raise ValueError(f"{field} cannot be null")
@@ -1227,21 +1243,31 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         if company is None or company.deleted_at is not None:
             raise HTTPException(404, "API 客户端所属公司不存在")
         targets = session.scalars(
-            select(NotificationTarget).where(
+            select(NotificationTarget)
+            .where(
                 NotificationTarget.company_id == item.company_id,
                 NotificationTarget.deleted_at.is_(None),
             )
+            .order_by(NotificationTarget.created_at, NotificationTarget.id)
         ).all()
         targets_by_code = {target.target_code: target for target in targets}
+        visible_codes = (
+            item.allowed_target_codes
+            if item.allowed_target_codes
+            else [target.target_code for target in targets]
+        )
         allowed_objects = [
             {
                 "user_object_code": code,
                 "account_name": (
                     targets_by_code[code].display_name if code in targets_by_code else "不可用对象"
                 ),
+                "description": (
+                    targets_by_code[code].description if code in targets_by_code else ""
+                ),
                 "enabled": targets_by_code[code].enabled if code in targets_by_code else False,
             }
-            for code in item.allowed_target_codes
+            for code in visible_codes
         ]
         connection = api_connection_json()
         permission_labels = {
@@ -1259,6 +1285,35 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             scope_text = "仅允许指定用户对象：" + "、".join(item.allowed_target_codes)
         else:
             scope_text = "允许公司全部用户对象，包括未来新增对象"
+
+        def markdown_table_text(value: object) -> str:
+            return (
+                str(value)
+                .replace("\r", " ")
+                .replace("\n", " ")
+                .replace("|", "\\|")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+
+        object_mapping = [
+            "| 调用标识 (`target_code`) | 对象名称 | 用途说明 | 状态 |",
+            "| --- | --- | --- | --- |",
+            *[
+                "| `"
+                + markdown_table_text(current["user_object_code"])
+                + "` | "
+                + markdown_table_text(current["account_name"])
+                + " | "
+                + markdown_table_text(current["description"] or "未填写")
+                + " | "
+                + ("启用" if current["enabled"] else "停用或不可用")
+                + " |"
+                for current in allowed_objects
+            ],
+        ]
+        if not allowed_objects:
+            object_mapping = ["_当前没有可用的用户对象。_"]
 
         api_base_url = str(connection["api_base_url"])
         steps: list[str] = []
@@ -1307,6 +1362,13 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                 "- Token 已由部署人员保存到环境变量 "
                 "`EMPLOYEE_VIDEO_NOTIFICATION_API_TOKEN`。禁止要求用户粘贴 Token，"
                 "禁止打印、写日志或提交 Git。",
+                "",
+                "## 用户对象映射",
+                "",
+                *object_mapping,
+                "",
+                "调用时必须使用上表的精确 `target_code`；对象名称和用途说明"
+                "只用于人工识别，禁止用名称、说明或 AI 猜测收件人。",
                 "",
                 "## 调用流程",
                 "",
@@ -1487,6 +1549,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             "company_id": item.company_id,
             "target_code": item.target_code,
             "display_name": item.display_name,
+            "description": item.description,
             "mode": item.mode.value,
             "enabled": item.enabled,
             "member_count": len(members),
@@ -1893,6 +1956,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             "company_id": item.company_id,
             "user_object_code": item.target_code,
             "account_name": item.display_name,
+            "description": item.description,
             "mode": item.mode.value,
             "enabled": item.enabled,
             "is_user_object": item.is_user_object,
@@ -1960,15 +2024,20 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         company = resolve_user_object_company(session, user, company_ref)
         item = NotificationTarget(
             company_id=company.id,
-            target_code=f"uo_{secrets.token_hex(10)}",
+            target_code=payload.routing_key or f"uo_{secrets.token_hex(10)}",
             display_name=payload.account_name,
+            description=payload.description,
             mode=TargetMode.MULTI,
             is_user_object=True,
         )
         session.add(item)
-        session.flush()
-        audit(session, user, "user_object.create", item, company.id)
-        session.commit()
+        try:
+            session.flush()
+            audit(session, user, "user_object.create", item, company.id)
+            session.commit()
+        except IntegrityError as exc:
+            session.rollback()
+            raise HTTPException(409, "该公司下调用标识已存在") from exc
         return user_object_json(session, item, can_manage=True)
 
     @router.get(
@@ -2008,6 +2077,8 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             raise HTTPException(422, "Explicit user object deactivation confirmation is required")
         if "account_name" in values:
             item.display_name = values["account_name"]
+        if "description" in values:
+            item.description = values["description"]
         if "enabled" in values:
             item.enabled = values["enabled"]
         item.updated_at = utcnow()
@@ -2353,6 +2424,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             company_id=payload.company_id,
             target_code=payload.target_code,
             display_name=payload.display_name,
+            description=payload.description,
             mode=payload.mode,
         )
         session.add(item)
@@ -2607,6 +2679,8 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             "company_id": company.id,
             "company_slug": company.slug,
             "target_code": item.target_code,
+            "account_name": item.display_name,
+            "description": item.description,
             "bot_count": len(members),
             "healthy_count": sum(
                 account.health_status == BotHealthStatus.HEALTHY for _, account, _ in members

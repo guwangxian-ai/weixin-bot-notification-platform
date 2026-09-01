@@ -20,6 +20,7 @@ type MockOptions = {
   tokenRotateGate?: Promise<void>
   userObjects?: Array<Record<string, unknown>>
   userObjectDetail?: Record<string, unknown>
+  notificationPreview?: Record<string, unknown>
 }
 
 function json(body: unknown, status = 200) {
@@ -109,8 +110,9 @@ function installApiMock(options: MockOptions = {}) {
       })
     }
     if (path === 'companies/greenhome/user-objects' && method === 'POST') {
-      return json({ user_object_code: 'created-object', account_name: body.account_name, enabled: true }, 201)
+      return json({ user_object_code: body.routing_key || 'created-object', account_name: body.account_name, description: body.description, enabled: true }, 201)
     }
+    if (path === 'companies/greenhome/user-objects/team-a' && method === 'PATCH') return json({ ...options.userObjects?.[0], ...body })
     if (path === 'companies/greenhome/user-objects/team-a/contacts' && method === 'POST') {
       return json({ employee_id: 'employee-new', ...body }, 201)
     }
@@ -119,6 +121,12 @@ function installApiMock(options: MockOptions = {}) {
     if (path.startsWith('employees?')) return json(options.employees || [])
     if (path.startsWith('notification-batches?')) return json([])
     if (path.startsWith('api-clients?')) return json(apiClients)
+    if (path === 'notifications/preview' && method === 'POST') {
+      return json(options.notificationPreview || {
+        target_code: body.target_code, account_name: '客服组', description: '客服异常时通知值班人员',
+        bot_count: 2, healthy_count: 1, bots: [],
+      })
+    }
     if (path === 'api-clients' && method === 'POST') {
       tokenIssued = true
       const respond = () => json({ id: 'client-1', name: body.name, token_prefix: 'evnc_test', permissions: body.permissions, allowed_target_codes: body.allowed_target_codes, enabled: true, token: 'one-time-test-token', integration }, 201)
@@ -250,12 +258,12 @@ describe('GeneralPlatformApp temporary workflow safety', () => {
     render(<GeneralPlatformApp />)
     await openSection('用户对象')
     await userEvent.click(screen.getByRole('button', { name: '创建用户对象' }))
-    await userEvent.type(screen.getByLabelText('账号名称'), '公司 A 草稿')
+    await userEvent.type(screen.getByLabelText('对象名称'), '公司 A 草稿')
     await userEvent.selectOptions(screen.getByLabelText('当前公司'), 'sanlin')
 
     await waitFor(() => expect(screen.queryByRole('form', { name: '新增用户对象' })).not.toBeInTheDocument())
     await userEvent.click(screen.getByRole('button', { name: '创建用户对象' }))
-    expect(screen.getByLabelText('账号名称')).toHaveValue('')
+    expect(screen.getByLabelText('对象名称')).toHaveValue('')
     expect(requests.filter(r => r.method === 'POST' && r.path.endsWith('/user-objects'))).toHaveLength(0)
   })
 
@@ -264,7 +272,7 @@ describe('GeneralPlatformApp temporary workflow safety', () => {
     render(<GeneralPlatformApp />)
     await openSection('用户对象')
     await userEvent.click(screen.getByRole('button', { name: '创建用户对象' }))
-    await userEvent.type(screen.getByLabelText('账号名称'), '草稿对象')
+    await userEvent.type(screen.getByLabelText('对象名称'), '草稿对象')
     await userEvent.click(screen.getByRole('button', { name: '取消' }))
     expect(screen.queryByRole('form', { name: '新增用户对象' })).not.toBeInTheDocument()
 
@@ -298,7 +306,7 @@ describe('GeneralPlatformApp temporary workflow safety', () => {
   it('defaults a new notification app to the complete workflow and one explicit object', async () => {
     const { requests } = installApiMock({
       userObjects: [{
-        user_object_code: 'team-a', account_name: '客服组', enabled: true,
+        user_object_code: 'team-a', account_name: '客服组', description: '客服异常时通知值班人员', enabled: true,
         bound_count: 2, pending_count: 0, unhealthy_count: 0,
       }],
     })
@@ -310,6 +318,7 @@ describe('GeneralPlatformApp temporary workflow safety', () => {
     expect(within(form).getByRole('radio', { name: /通知应用/ })).toBeChecked()
     expect(within(form).getByRole('radio', { name: '只允许指定对象' })).toBeChecked()
     expect(within(form).getByRole('checkbox', { name: /客服组/ })).toBeChecked()
+    expect(within(form).getByText('用途：客服异常时通知值班人员')).toBeVisible()
     await userEvent.type(within(form).getByLabelText('应用名称'), '销售通知系统')
     await userEvent.click(within(form).getByRole('button', { name: '创建并显示接入凭据' }))
 
@@ -559,7 +568,7 @@ describe('merged user object management', () => {
   afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
   const object = {
-    user_object_code: 'team-a', account_name: '客服组', enabled: true,
+    user_object_code: 'team-a', account_name: '客服组', description: '客服异常时通知值班人员', enabled: true,
     bound_count: 1, pending_count: 1, unhealthy_count: 1,
     last_test_at: '2026-08-20T08:00:00Z', all_available: true,
   }
@@ -594,6 +603,65 @@ describe('merged user object management', () => {
     expect(screen.getByRole('button', { name: '解绑' })).toBeVisible()
   })
 
+  it('shows and copies stable API routing parameters without guessing by display name', async () => {
+    const writeText = vi.fn(async (_value: string) => {})
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    installApiMock({ userObjects: [object], userObjectDetail: detail })
+    render(<GeneralPlatformApp />)
+    await openSection('用户对象')
+
+    expect(await screen.findByText('team-a')).toBeVisible()
+    expect(screen.getByText('客服异常时通知值班人员')).toBeVisible()
+    await userEvent.click(screen.getByRole('button', { name: '展开客服组详情' }))
+    await userEvent.click(await screen.findByRole('button', { name: '复制调用参数' }))
+
+    expect(writeText).toHaveBeenCalledWith(JSON.stringify({
+      company_slug: 'greenhome', target_code: 'team-a',
+    }, null, 2))
+    expect(await screen.findByText('“客服组”的调用参数已复制。')).toBeVisible()
+  })
+
+  it('previews the current Bot fan-out without sending a notification', async () => {
+    const { requests } = installApiMock({ userObjects: [object], userObjectDetail: detail })
+    render(<GeneralPlatformApp />)
+    await openSection('用户对象')
+    await userEvent.click(await screen.findByRole('button', { name: '展开客服组详情' }))
+    requests.splice(0)
+    await userEvent.click(await screen.findByRole('button', { name: '预览接收范围' }))
+
+    const preview = await screen.findByRole('status', { name: '客服组接收范围预览' })
+    expect(within(preview).getByText('1')).toBeVisible()
+    expect(within(preview).getByText('/ 2 个 Bot 健康可发送')).toBeVisible()
+    expect(within(preview).getByText('本次仅预览，未发送任何通知。正式调用时会按当时健康 Bot 重新计算。')).toBeVisible()
+    expect(requests).toContainEqual({
+      path: 'notifications/preview', method: 'POST',
+      body: { company_slug: 'greenhome', target_code: 'team-a' },
+    })
+    expect(requests.some(request => request.path === 'notifications/send')).toBe(false)
+  })
+
+  it('edits the display name and purpose while keeping the routing key immutable', async () => {
+    const { requests } = installApiMock({ userObjects: [object], userObjectDetail: detail })
+    render(<GeneralPlatformApp />)
+    await openSection('用户对象')
+    await userEvent.click(await screen.findByRole('button', { name: '展开客服组详情' }))
+    await userEvent.click(await screen.findByRole('button', { name: '编辑客服组' }))
+    const form = screen.getByRole('form', { name: '编辑用户对象' })
+    const code = within(form).getByLabelText('调用标识（不可修改）')
+    expect(code).toHaveValue('team-a')
+    expect(code).toHaveAttribute('readonly')
+    await userEvent.clear(within(form).getByLabelText('对象名称'))
+    await userEvent.type(within(form).getByLabelText('对象名称'), '客服值班组')
+    await userEvent.clear(within(form).getByLabelText('用途说明（可选）'))
+    await userEvent.type(within(form).getByLabelText('用途说明（可选）'), '客服系统报警专用')
+    await userEvent.click(within(form).getByRole('button', { name: '保存修改' }))
+
+    await waitFor(() => expect(requests).toContainEqual({
+      path: 'companies/greenhome/user-objects/team-a', method: 'PATCH',
+      body: { account_name: '客服值班组', description: '客服系统报警专用' },
+    }))
+  })
+
   it('does not offer the server-rejected rebind action for an active binding', async () => {
     installApiMock({ userObjects: [object], userObjectDetail: detail })
     render(<GeneralPlatformApp />)
@@ -618,18 +686,24 @@ describe('merged user object management', () => {
     }))
   })
 
-  it('creates an object with account name only and does not expose code or mode', async () => {
+  it('creates an object with a stable routing key and a human-readable purpose', async () => {
     const { requests } = installApiMock()
     render(<GeneralPlatformApp />)
     await openSection('用户对象')
     await userEvent.click(screen.getByRole('button', { name: '创建用户对象' }))
     const form = screen.getByRole('form', { name: '新增用户对象' })
-    expect(within(form).getByLabelText('账号名称')).toBeVisible()
-    expect(within(form).queryByText(/target_code|模式|single|multi|dynamic_all/)).not.toBeInTheDocument()
-    await userEvent.type(within(form).getByLabelText('账号名称'), '新账号')
+    expect(within(form).getByLabelText('对象名称')).toBeVisible()
+    expect(within(form).getByLabelText('调用标识（可选）')).toBeVisible()
+    expect(within(form).getByLabelText('用途说明（可选）')).toBeVisible()
+    await userEvent.type(within(form).getByLabelText('对象名称'), '美妆剪辑审核组')
+    await userEvent.type(within(form).getByLabelText('调用标识（可选）'), 'video.beauty.review')
+    await userEvent.type(within(form).getByLabelText('用途说明（可选）'), 'AI 剪辑完成或失败时通知美妆运营组')
     await userEvent.click(within(form).getByRole('button', { name: '创建' }))
     await waitFor(() => expect(requests).toContainEqual({
-      path: 'companies/greenhome/user-objects', method: 'POST', body: { account_name: '新账号' },
+      path: 'companies/greenhome/user-objects', method: 'POST', body: {
+        account_name: '美妆剪辑审核组', routing_key: 'video.beauty.review',
+        description: 'AI 剪辑完成或失败时通知美妆运营组',
+      },
     }))
   })
 

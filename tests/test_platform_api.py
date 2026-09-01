@@ -27,6 +27,7 @@ def create_target(
     code: str,
     binding_ids: list[str] | None = None,
     mode: str = "single",
+    description: str = "",
 ) -> dict:
     response = client.post(
         "/api/v1/notification-targets",
@@ -35,6 +36,7 @@ def create_target(
             "company_id": company_id,
             "target_code": code,
             "display_name": f"对象 {code}",
+            "description": description,
             "mode": mode,
             "binding_ids": binding_ids or [],
         },
@@ -87,15 +89,23 @@ def test_target_mode_and_api_client_name_are_editable(client: TestClient) -> Non
         company_id="greenhome",
         code="editable-target",
         binding_ids=[detail["binding"]["binding_id"]],
+        description="剪辑任务完成通知",
     )
+    assert target["description"] == "剪辑任务完成通知"
 
     updated_target = client.patch(
         f"/api/v1/notification-targets/{target['target_id']}",
         headers=auth(csrf),
-        json={"display_name": "更新后的对象", "mode": "dynamic_all", "binding_ids": []},
+        json={
+            "display_name": "更新后的对象",
+            "description": "更新后的业务用途",
+            "mode": "dynamic_all",
+            "binding_ids": [],
+        },
     )
     assert updated_target.status_code == 200, updated_target.text
     assert updated_target.json()["display_name"] == "更新后的对象"
+    assert updated_target.json()["description"] == "更新后的业务用途"
     assert updated_target.json()["mode"] == "dynamic_all"
     assert updated_target.json()["member_count"] == 1
 
@@ -110,6 +120,23 @@ def test_target_mode_and_api_client_name_are_editable(client: TestClient) -> Non
         },
     )
     assert issued.status_code == 201, issued.text
+    integration = issued.json()["integration"]
+    assert integration["all_user_objects"] is True
+    editable_mapping = next(
+        item
+        for item in integration["allowed_user_objects"]
+        if item["user_object_code"] == "editable-target"
+    )
+    assert editable_mapping == {
+        "user_object_code": "editable-target",
+        "account_name": "更新后的对象",
+        "description": "更新后的业务用途",
+        "enabled": True,
+    }
+    assert "允许公司全部用户对象，包括未来新增对象" in integration["guide_markdown"]
+    assert "| `editable-target` | 更新后的对象 | 更新后的业务用途 | 启用 |" in integration[
+        "guide_markdown"
+    ]
     updated_client = client.patch(
         f"/api/v1/api-clients/{issued.json()['id']}",
         headers=auth(csrf),
@@ -308,6 +335,7 @@ def test_database_api_client_is_one_time_scoped_rotatable_and_audited(
         company_id="greenhome",
         code="alerts",
         binding_ids=[detail["binding"]["binding_id"]],
+        description="核心系统告警",
     )
     create_target(
         client,
@@ -363,7 +391,15 @@ def test_database_api_client_is_one_time_scoped_rotatable_and_audited(
     assert integration["permissions"] == ["query", "send", "status"]
     assert integration["all_user_objects"] is False
     assert integration["allowed_user_objects"] == [
-        {"user_object_code": "alerts", "account_name": "对象 alerts", "enabled": True}
+        {
+            "user_object_code": "alerts",
+            "account_name": "对象 alerts",
+            "description": "核心系统告警",
+            "enabled": True,
+        }
+    ]
+    assert "| `alerts` | 对象 alerts | 核心系统告警 | 启用 |" in integration[
+        "guide_markdown"
     ]
     assert "EMPLOYEE_VIDEO_NOTIFICATION_API_TOKEN" in integration["guide_markdown"]
     assert token not in integration["guide_markdown"]

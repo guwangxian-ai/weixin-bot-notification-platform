@@ -241,6 +241,9 @@ class NotificationTarget(Base):
     company_id: Mapped[str] = mapped_column(ForeignKey("companies.id"), nullable=False, index=True)
     target_code: Mapped[str] = mapped_column(String(100), nullable=False)
     display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default=text("''")
+    )
     mode: Mapped[TargetMode] = mapped_column(Enum(TargetMode), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
     is_user_object: Mapped[bool] = mapped_column(

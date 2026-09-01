@@ -11,7 +11,7 @@
 - `weixin_binding_sessions`：员工范围官方二维码会话、完整状态机、加密 ticket/扫码数据、过期与消费时间。
 - `weixin_bot_accounts`：全系统唯一 iLink Bot 身份、加密 token/base URL/owner 和健康状态。
 - `employee_bot_bindings`：员工与 Bot 的历史分配；SQLite 部分唯一索引确保每名员工、每个 Bot 至多一个 active 关系。
-- `notification_targets`：稳定通知对象及旧 `single/multi/dynamic_all` 兼容语义；`is_user_object` 标识仅由新别名创建的业务账号对象。
+- `notification_targets`：稳定通知对象及旧 `single/multi/dynamic_all` 兼容语义；`is_user_object` 标识仅由新别名创建的业务账号对象。创建用户对象时可选的 `routing_key` 不是独立列，它会直接作为公司内唯一且创建后不可修改的 `target_code`；未指定时仍生成 `uo_<random>`，旧随机编码原样兼容。可选 `description` 仅保存用途说明，不参与路由或成员解析。
 - `target_bot_members`：旧 single/multi 对象按 binding 版本保存的成员历史。
 - `user_object_contacts`：新用户对象到稳定联系人的关系；移除采用 inactive/removed_at 软移除，迁移 trigger 阻止跨公司关联。
 - `video_assets`：一次性视频暂存的所有者、登记路径、类型、大小、SHA-256、标题文案，以及原子 `claimed_delivery_id`、`consumed_at`、`file_deleted_at` 生命周期；真实微信媒体发送成功并提交阶段状态后才删除物理文件，元数据继续保留以维持通知历史与外键完整性。

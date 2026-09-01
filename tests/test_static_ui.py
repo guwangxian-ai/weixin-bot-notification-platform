@@ -71,6 +71,10 @@ def test_general_platform_ui_has_required_information_architecture_and_mobile_st
         "添加联系人",
         "生成二维码",
         "编辑",
+        "调用标识",
+        "用途说明",
+        "复制调用参数",
+        "预览接收范围",
         "逐 Bot 安全测试",
         "从当前对象移除",
         "解绑",
@@ -80,7 +84,7 @@ def test_general_platform_ui_has_required_information_architecture_and_mobile_st
     ):
         assert label in user_objects
     assert "companies/${company}/user-objects" in source
-    assert "target_code" not in user_objects
+    assert "target_code" in user_objects
     assert "dynamic_all" not in user_objects
     assert "绿色家装饰 · 业务系统" not in source
     assert "装修" not in source

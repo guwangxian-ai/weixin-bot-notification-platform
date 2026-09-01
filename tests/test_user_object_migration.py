@@ -93,6 +93,7 @@ def test_user_object_migration_adds_private_contact_storage_and_tenant_guards(
 
     assert {"phone_encrypted", "phone_fingerprint", "phone_masked"} <= employee_columns
     assert target_columns["is_user_object"] == "0"
+    assert target_columns["description"] == "''"
     assert {
         "id",
         "company_id",

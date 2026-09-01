@@ -34,6 +34,7 @@ def test_user_object_can_start_empty_and_contact_phone_is_encrypted_and_redacted
     assert created["bound_count"] == 0
     assert created["pending_count"] == 0
     assert created["unhealthy_count"] == 0
+    assert created["description"] == ""
 
     added = client.post(
         f"/api/v1/companies/greenhome/user-objects/{code}/contacts",
@@ -68,6 +69,118 @@ def test_user_object_can_start_empty_and_contact_phone_is_encrypted_and_redacted
     assert business_contact["masked_phone"] == "138****8000"
     assert "binding_session" not in business_contact
     assert not ({"phone_encrypted", "phone_fingerprint"} & business_contact.keys())
+
+
+def test_user_object_routing_key_is_semantic_unique_and_immutable(
+    client: TestClient,
+) -> None:
+    csrf = login(client)
+    response = client.post(
+        "/api/v1/companies/greenhome/user-objects",
+        headers=auth(csrf),
+        json={
+            "account_name": "美妆剪辑审核组",
+            "routing_key": "video.beauty.review",
+            "description": "AI 剪辑完成或失败时通知美妆运营组",
+        },
+    )
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["user_object_code"] == "video.beauty.review"
+    assert created["description"] == "AI 剪辑完成或失败时通知美妆运营组"
+
+    listed = client.get("/api/v1/companies/greenhome/user-objects")
+    mapped = next(
+        item for item in listed.json() if item["user_object_code"] == "video.beauty.review"
+    )
+    assert mapped["account_name"] == "美妆剪辑审核组"
+    assert mapped["description"] == created["description"]
+
+    preview = client.post(
+        "/api/v1/notifications/preview",
+        headers=auth(csrf),
+        json={"company_slug": "greenhome", "target_code": "video.beauty.review"},
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["account_name"] == "美妆剪辑审核组"
+    assert preview.json()["description"] == created["description"]
+
+    path = "/api/v1/companies/greenhome/user-objects/video.beauty.review"
+    updated = client.patch(
+        path,
+        headers=auth(csrf),
+        json={"description": "仅通知美妆成片审核"},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["description"] == "仅通知美妆成片审核"
+    cleared = client.patch(path, headers=auth(csrf), json={"description": ""})
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["description"] == ""
+    for invalid_description in (None, "x" * 501):
+        invalid_update = client.patch(
+            path,
+            headers=auth(csrf),
+            json={"description": invalid_description},
+        )
+        assert invalid_update.status_code == 422, invalid_update.text
+
+    for attempted_key in ("video.finance.review", None):
+        immutable = client.patch(
+            path,
+            headers=auth(csrf),
+            json={"routing_key": attempted_key},
+        )
+        assert immutable.status_code == 422, immutable.text
+    assert client.get(path).json()["user_object_code"] == "video.beauty.review"
+
+    duplicate = client.post(
+        "/api/v1/companies/greenhome/user-objects",
+        headers=auth(csrf),
+        json={"account_name": "重复调用标识", "routing_key": "video.beauty.review"},
+    )
+    assert duplicate.status_code == 409, duplicate.text
+
+    same_key_other_company = client.post(
+        "/api/v1/companies/sanlin/user-objects",
+        headers=auth(csrf),
+        json={"account_name": "另一公司对象", "routing_key": "video.beauty.review"},
+    )
+    assert same_key_other_company.status_code == 201, same_key_other_company.text
+
+    invalid_keys = [
+        "Video.beauty",
+        ".video",
+        "video.",
+        "video:beauty",
+        "video beauty",
+        "a" * 65,
+    ]
+    for routing_key in invalid_keys:
+        invalid = client.post(
+            "/api/v1/companies/greenhome/user-objects",
+            headers=auth(csrf),
+            json={"account_name": "无效调用标识", "routing_key": routing_key},
+        )
+        assert invalid.status_code == 422, (routing_key, invalid.text)
+
+    one_character = client.post(
+        "/api/v1/companies/greenhome/user-objects",
+        headers=auth(csrf),
+        json={"account_name": "单字符调用标识", "routing_key": "a"},
+    )
+    assert one_character.status_code == 201, one_character.text
+    max_length_key = client.post(
+        "/api/v1/companies/greenhome/user-objects",
+        headers=auth(csrf),
+        json={"account_name": "64 字符调用标识", "routing_key": "b" * 64},
+    )
+    assert max_length_key.status_code == 201, max_length_key.text
+    invalid_create_description = client.post(
+        "/api/v1/companies/greenhome/user-objects",
+        headers=auth(csrf),
+        json={"account_name": "过长说明", "description": "x" * 501},
+    )
+    assert invalid_create_description.status_code == 422, invalid_create_description.text
 
 
 def test_contact_memberships_are_idempotent_and_soft_removed(client: TestClient) -> None:

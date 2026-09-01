@@ -5,10 +5,11 @@ import './platform.css'
 type Company={company_id:string;company_slug:string;name:string;enabled:boolean;api_base_url?:string;api_address_scope?:string;api_address_warning?:string}
 
 type UserContact={employee_id:string;name:string;masked_phone?:string;phone?:string;status:string;binding?:{binding_id?:string;status:string;health_status?:string;bot_masked?:string;manual_test?:{allowed:boolean}};binding_session?:BindSession}
-type UserObject={user_object_code:string;account_name:string;enabled:boolean;manageable?:boolean;bound_count:number;pending_count:number;unhealthy_count:number;last_test_at?:string;all_available?:boolean;contacts?:UserContact[]}
+type UserObject={user_object_code:string;account_name:string;description?:string;enabled:boolean;manageable?:boolean;bound_count:number;pending_count:number;unhealthy_count:number;last_test_at?:string;all_available?:boolean;contacts?:UserContact[]}
+type RecipientPreview={target_code:string;account_name?:string;description?:string;bot_count:number;healthy_count:number}
 type Batch={id:string;status:string;total:number;sent:number;failed:number;skipped:number;title:string;created_at:string;deliveries:Array<{delivery_id:string;bot_masked:string;status:string;failure_message?:string}>}
 type Client={id:string;name:string;token_prefix:string;permissions:string[];allowed_target_codes:string[];enabled:boolean;last_used_at?:string}
-type IntegrationGuide={api_base_url:string;api_address_scope:string;api_address_warning:string;company_id:string;company_slug:string;company_name:string;client_id:string;client_name:string;permissions:string[];all_user_objects:boolean;allowed_user_objects:Array<{user_object_code:string;account_name:string;enabled:boolean}>;delivery_mode:string;guide_markdown:string;curl_check:string}
+type IntegrationGuide={api_base_url:string;api_address_scope:string;api_address_warning:string;company_id:string;company_slug:string;company_name:string;client_id:string;client_name:string;permissions:string[];all_user_objects:boolean;allowed_user_objects:Array<{user_object_code:string;account_name:string;description?:string;enabled:boolean}>;delivery_mode:string;guide_markdown:string;curl_check:string}
 type IssuedCredential=Client&{token:string;integration:IntegrationGuide}
 type ClientForm={name:string;permission_preset:'notification'|'query'|'custom';permissions:string[];object_scope:'all'|'selected';allowed_target_codes:string[]}
 type BindSession={id:string;employee_id:string;status:string;qr_image_url?:string;failure_code?:string}
@@ -92,12 +93,13 @@ function Companies({csrf,role,companies,refresh,selectCompany,notify,setPending}
  </Panel>
 }
 
-function UserObjects({csrf,company,userObjects,refresh,notify,setPending}:Props){
+function UserObjects({csrf,company,current,userObjects,refresh,notify,setPending}:Props){
  const[createOpen,setCreateOpen]=useState(false)
- const[name,setName]=useState('')
+ const[createForm,setCreateForm]=useState({account_name:'',routing_key:'',description:''})
  const[expanded,setExpanded]=useState('')
  const[details,setDetails]=useState<Record<string,UserObject>>({})
- const[editName,setEditName]=useState('')
+ const[editForm,setEditForm]=useState<{code:string;account_name:string;description:string}>()
+ const[previews,setPreviews]=useState<Record<string,RecipientPreview>>({})
  const[contactMode,setContactMode]=useState<{code:string;contact?:UserContact}>()
  const[contactForm,setContactForm]=useState({name:'',phone:''})
  const[session,setSession]=useState<BindSession>()
@@ -105,12 +107,18 @@ function UserObjects({csrf,company,userObjects,refresh,notify,setPending}:Props)
  const[error,setError]=useState('')
  const returnFocus=useRef<HTMLElement|null>(null)
  const base=`companies/${company}/user-objects`
+ const currentCompanySlug=current?.company_slug||company
+ useEffect(()=>setPreviews({}),[userObjects])
+ const resetCreate=()=>{setCreateOpen(false);setCreateForm({account_name:'',routing_key:'',description:''})}
  const refreshAfter=async(message:string)=>{notify(message);try{await refresh()}catch{setError(`${message.replace(/。$/,'')}，但列表刷新失败，请手动刷新`)}}
- const invalidate=(code:string)=>setDetails(old=>{const next={...old};delete next[code];return next})
- const create=async(e:React.FormEvent)=>{e.preventDefault();if(busy)return;setBusy('create');setPending(true);setError('');try{await api(base,write(csrf,'POST',{account_name:name}));setCreateOpen(false);setName('');await refreshAfter('用户对象创建成功。')}catch(err){setError((err as Error).message)}finally{setBusy('');setPending(false)}}
- const expand=async(item:UserObject)=>{const code=item.user_object_code;if(expanded===code){setExpanded('');setContactMode(undefined);return}setExpanded(code);setContactMode(undefined);if(details[code])return;setBusy(`detail:${code}`);setError('');try{const detail=await api(`${base}/${code}`) as UserObject;setDetails(old=>({...old,[code]:detail}))}catch(err){setError((err as Error).message)}finally{setBusy('')}}
- const mutate=async(key:string,path:string,method:string,message:string,question?:string,body?:unknown)=>{if(busy||question&&!confirm(question))return;setBusy(key);setPending(true);setError('');try{await api(path,write(csrf,method,body));invalidate(expanded);setExpanded('');await refreshAfter(message)}catch(err){setError((err as Error).message)}finally{setBusy('');setPending(false)}}
- const saveObject=async(e:React.FormEvent,item:UserObject)=>{e.preventDefault();await mutate(`edit:${item.user_object_code}`,`${base}/${item.user_object_code}`,'PATCH','用户对象修改已保存。',undefined,{account_name:editName});setEditName('')}
+ const invalidate=(code:string)=>{setDetails(old=>{const next={...old};delete next[code];return next});setPreviews(old=>{const next={...old};delete next[code];return next})}
+ const create=async(e:React.FormEvent)=>{e.preventDefault();if(busy)return;setBusy('create');setPending(true);setError('');const routingKey=createForm.routing_key.trim();try{await api(base,write(csrf,'POST',{account_name:createForm.account_name,description:createForm.description,...(routingKey?{routing_key:routingKey}:{})}));resetCreate();await refreshAfter('用户对象创建成功。')}catch(err){setError((err as Error).message)}finally{setBusy('');setPending(false)}}
+ const expand=async(item:UserObject)=>{const code=item.user_object_code;if(expanded===code){setExpanded('');setContactMode(undefined);setEditForm(undefined);return}setExpanded(code);setContactMode(undefined);setEditForm(undefined);if(details[code])return;setBusy(`detail:${code}`);setError('');try{const detail=await api(`${base}/${code}`) as UserObject;setDetails(old=>({...old,[code]:detail}))}catch(err){setError((err as Error).message)}finally{setBusy('')}}
+ const mutate=async(key:string,path:string,method:string,message:string,question?:string,body?:unknown)=>{if(busy||question&&!confirm(question))return false;setBusy(key);setPending(true);setError('');try{await api(path,write(csrf,method,body));invalidate(expanded);setExpanded('');await refreshAfter(message);return true}catch(err){setError((err as Error).message);return false}finally{setBusy('');setPending(false)}}
+ const saveObject=async(e:React.FormEvent,item:UserObject)=>{e.preventDefault();if(!editForm)return;const saved=await mutate(`edit:${item.user_object_code}`,`${base}/${item.user_object_code}`,'PATCH','用户对象修改已保存。',undefined,{account_name:editForm.account_name,description:editForm.description});if(saved)setEditForm(undefined)}
+ const beginEdit=(item:UserObject)=>setEditForm({code:item.user_object_code,account_name:item.account_name,description:item.description||''})
+ const copyRouting=async(item:UserObject)=>{setError('');try{await copyText(JSON.stringify({company_slug:currentCompanySlug,target_code:item.user_object_code},null,2));notify(`“${item.account_name}”的调用参数已复制。`)}catch(err){setError((err as Error).message)}}
+ const previewRecipients=async(item:UserObject)=>{if(busy)return;const code=item.user_object_code;setBusy(`preview:${code}`);setError('');try{const result=await api('notifications/preview',write(csrf,'POST',{company_slug:currentCompanySlug,target_code:code})) as RecipientPreview;setPreviews(old=>({...old,[code]:result}))}catch(err){setError((err as Error).message)}finally{setBusy('')}}
  const beginContact=(code:string,contact?:UserContact)=>{setContactMode({code,contact});setContactForm({name:contact?.name||'',phone:contact?.phone||''});setError('')}
  const saveContact=async(e:React.FormEvent)=>{e.preventDefault();if(!contactMode||busy)return;const{code,contact}=contactMode;setBusy(`contact:${code}`);setPending(true);setError('');try{const path=contact?`${base}/${code}/contacts/${contact.employee_id}`:`${base}/${code}/contacts`;await api(path,write(csrf,contact?'PATCH':'POST',{name:contactForm.name,phone:contactForm.phone}));setContactMode(undefined);setContactForm({name:'',phone:''});invalidate(code);setExpanded('');await refreshAfter(contact?'联系人修改已保存。':'联系人添加成功。')}catch(err){setError((err as Error).message)}finally{setBusy('');setPending(false)}}
  const openBinding=async(code:string,contact:UserContact,trigger:HTMLElement)=>{setBusy(`bind:${contact.employee_id}`);setPending(true);setError('');returnFocus.current=trigger;try{const live=contact.binding_session&&['pending','scanned','confirming'].includes(contact.binding_session.status);setSession(live?contact.binding_session:await api(`${base}/${code}/contacts/${contact.employee_id}/binding-sessions`,write(csrf,'POST')))}catch(err){setError((err as Error).message)}finally{setBusy('');setPending(false)}}
@@ -119,29 +127,36 @@ function UserObjects({csrf,company,userObjects,refresh,notify,setPending}:Props)
  return <>
   <Panel title="用户对象" action={<button type="button" className="primary small" disabled={createOpen||!!busy} onClick={()=>setCreateOpen(true)}><Plus size={15}/>创建用户对象</button>}>
    {error&&<p className="form-error" role="alert">{error}。已保留未完成输入，请检查状态后重试。</p>}
-   {createOpen&&<form className="inline-form temporary-form" aria-label="新增用户对象" onSubmit={create} onKeyDown={e=>{if(e.key==='Escape'&&!busy){setCreateOpen(false);setName('')}}}>
-    <label>账号名称<input autoFocus required disabled={!!busy} value={name} onChange={e=>setName(e.target.value)}/></label>
-    <div className="form-actions"><button className="primary" type="submit" disabled={!!busy}>{busy==='create'?'创建中…':'创建'}</button><button className="ghost" type="button" disabled={!!busy} onClick={()=>{setCreateOpen(false);setName('')}}>取消</button></div>
+   {createOpen&&<form className="target-form temporary-form object-form" aria-label="新增用户对象" onSubmit={create} onKeyDown={e=>{if(e.key==='Escape'&&!busy)resetCreate()}}>
+    <label>对象名称<input aria-label="对象名称" autoFocus required disabled={!!busy} placeholder="例如：美妆剪辑审核组" value={createForm.account_name} onChange={e=>setCreateForm({...createForm,account_name:e.target.value})}/><small>给管理员识别，后续可修改。</small></label>
+    <label>调用标识（可选）<input aria-label="调用标识（可选）" disabled={!!busy} minLength={1} maxLength={64} pattern="[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?" placeholder="video.beauty.review" value={createForm.routing_key} onChange={e=>setCreateForm({...createForm,routing_key:e.target.value})}/><small>接口稳定定位对象；仅支持小写字母、数字、点、下划线和连字符，创建后不可修改。留空将自动生成。</small></label>
+    <label className="full-width">用途说明（可选）<textarea aria-label="用途说明（可选）" disabled={!!busy} rows={3} maxLength={500} placeholder="例如：AI 剪辑完成或失败时，通知美妆运营组审核" value={createForm.description} onChange={e=>setCreateForm({...createForm,description:e.target.value})}/><small>会显示在对象列表和应用授权页，帮助调用方选对收件人；不参与接口匹配。</small></label>
+    <div className="form-actions"><button className="primary" type="submit" disabled={!!busy}>{busy==='create'?'创建中…':'创建'}</button><button className="ghost" type="button" disabled={!!busy} onClick={resetCreate}>取消</button></div>
    </form>}
    <div className="card-list user-object-list">{userObjects.length?userObjects.map(item=>{
     const code=item.user_object_code,detail=details[code],contacts=detail?.contacts||[],open=expanded===code
     return <article className="user-object-card" key={code}>
      <div className="user-object-summary">
-      <div><b>{item.account_name}</b><small>最近测试 {time(item.last_test_at)}</small></div>
+      <div className="object-identity"><b>{item.account_name}</b><code>{code}</code><small className={item.description?'object-description':'object-description empty-description'}>{item.description||'未填写用途说明，建议补充后再授权给外部应用。'}</small><small>最近测试 {time(item.last_test_at)}</small></div>
       <div className="object-counts"><span>已绑定 {item.bound_count||0}</span><span>待绑定 {item.pending_count||0}</span><span className={item.unhealthy_count?'danger':''}>异常 {item.unhealthy_count||0}</span></div>
       <Badge value={item.enabled?'active':'disabled'}/>
       <button type="button" className="ghost small" disabled={!!busy} aria-expanded={open} aria-label={`${open?'收起':'展开'}${item.account_name}详情`} onClick={()=>void expand(item)}>{busy===`detail:${code}`?'加载中…':open?'收起详情':'查看详情'}</button>
      </div>
      {open&&<section className="user-object-detail" aria-label={`${item.account_name}详情`}>
-      {item.manageable!==false&&<div className="row-actions object-actions">
-       <button type="button" className="ghost small" disabled={!!busy} onClick={()=>setEditName(item.account_name)}>编辑</button>
+      <div className="row-actions object-actions">
+       <button type="button" className="ghost small" disabled={!!busy} onClick={()=>void copyRouting(item)}><Copy size={14}/>复制调用参数</button>
+       <button type="button" className="ghost small" disabled={!!busy||!item.enabled} onClick={()=>void previewRecipients(item)}>{busy===`preview:${code}`?'预览中…':'预览接收范围'}</button>
+       {item.manageable!==false&&<>
+       <button type="button" className="ghost small" aria-label={`编辑${item.account_name}`} disabled={!!busy} onClick={()=>beginEdit(item)}>编辑</button>
        <button type="button" className="ghost small" disabled={!!busy} onClick={()=>beginContact(code)}>添加联系人</button>
        <button type="button" className="ghost small" disabled={!!busy||item.all_available} onClick={()=>void mutate(`bindall:${code}`,`${base}/${code}/bind-all`,'POST','已绑定全部可用 Bot。')}>绑定全部可用 Bot</button>
        <button type="button" className="ghost small" disabled={!!busy} onClick={()=>void mutate(`toggle:${code}`,`${base}/${code}`,'PATCH',`用户对象已${item.enabled?'停用':'启用'}。`,item.enabled?`确认停用“${item.account_name}”？`:undefined,{enabled:!item.enabled,confirm:item.enabled})}>{item.enabled?'停用':'启用'}</button>
        <button type="button" className="ghost small danger" disabled={!!busy||item.all_available} onClick={()=>void mutate(`delete:${code}`,`${base}/${code}`,'DELETE','用户对象已删除。',`确认删除“${item.account_name}”？`,{confirm:true})}>删除</button>
-      </div>}
+       </>}
+      </div>
       {item.all_available&&<p className="muted">该兼容对象会在每次通知时动态使用当时全部有效 Bot，收件范围不会被静默固定。</p>}
-      {editName&&<form className="inline-form temporary-form" aria-label="编辑用户对象" onSubmit={e=>void saveObject(e,item)}><label>账号名称<input required disabled={!!busy} value={editName} onChange={e=>setEditName(e.target.value)}/></label><div className="form-actions"><button className="primary" type="submit">保存修改</button><button className="ghost" type="button" onClick={()=>setEditName('')}>取消</button></div></form>}
+      {previews[code]&&<section className="recipient-preview" role="status" aria-label={`${item.account_name}接收范围预览`}><div><span>接收范围预览</span><strong>{previews[code].account_name||item.account_name}</strong><code>{previews[code].target_code||code}</code></div><div className="preview-count"><strong>{previews[code].healthy_count}</strong><span>/ {previews[code].bot_count} 个 Bot 健康可发送</span></div><p>{previews[code].description||item.description||'未填写用途说明。'}</p><small>本次仅预览，未发送任何通知。正式调用时会按当时健康 Bot 重新计算。</small></section>}
+      {editForm?.code===code&&<form className="target-form temporary-form object-form" aria-label="编辑用户对象" onSubmit={e=>void saveObject(e,item)}><label>对象名称<input aria-label="对象名称" required disabled={!!busy} value={editForm.account_name} onChange={e=>setEditForm({...editForm,account_name:e.target.value})}/></label><label>调用标识（不可修改）<input aria-label="调用标识（不可修改）" readOnly value={code}/><small>调用标识已被外部应用引用，为避免错发不允许修改。</small></label><label className="full-width">用途说明（可选）<textarea aria-label="用途说明（可选）" disabled={!!busy} rows={3} maxLength={500} value={editForm.description} onChange={e=>setEditForm({...editForm,description:e.target.value})}/></label><div className="form-actions"><button className="primary" type="submit" disabled={!!busy}>{busy===`edit:${code}`?'保存中…':'保存修改'}</button><button className="ghost" type="button" disabled={!!busy} onClick={()=>setEditForm(undefined)}>取消</button></div></form>}
       {contactMode?.code===code&&<form className="inline-form temporary-form" aria-label={contactMode.contact?'编辑联系人':'添加联系人'} onSubmit={saveContact} onKeyDown={e=>{if(e.key==='Escape'&&!busy)setContactMode(undefined)}}>
        <label>姓名<input required disabled={!!busy} value={contactForm.name} onChange={e=>setContactForm({...contactForm,name:e.target.value})}/></label>
        <label>电话<input required disabled={!!busy} inputMode="tel" value={contactForm.phone} onChange={e=>setContactForm({...contactForm,phone:e.target.value})}/></label>
@@ -197,7 +212,7 @@ function Clients({csrf,company,current,clients,userObjects,refresh,notify,setPen
    <fieldset disabled={!!busy}><legend>允许的用户对象</legend><div className="scope-options">
     <label className="check"><input type="radio" name="object-scope" checked={form.object_scope==='selected'} onChange={()=>setForm({...form,object_scope:'selected'})}/>只允许指定对象</label>
     <label className="check"><input type="radio" name="object-scope" checked={form.object_scope==='all'} onChange={()=>setForm({...form,object_scope:'all'})}/>允许公司全部对象，包括未来新增对象</label>
-   </div>{form.object_scope==='selected'&&<div className="object-picker">{userObjects.length?userObjects.map(item=><label className="check" key={item.user_object_code}><input type="checkbox" checked={form.allowed_target_codes.includes(item.user_object_code)} onChange={()=>setForm({...form,allowed_target_codes:toggle(form.allowed_target_codes,item.user_object_code)})}/><span><b>{item.account_name}{item.enabled?'':'（已停用）'}</b><code>{item.user_object_code}</code><small>已绑定 {item.bound_count} · 待绑定 {item.pending_count} · 异常 {item.unhealthy_count}</small></span></label>):<p className="muted">当前公司还没有用户对象；可明确选择“允许公司全部对象”后先创建接入。</p>}</div>}</fieldset>
+   </div>{form.object_scope==='selected'&&<div className="object-picker">{userObjects.length?userObjects.map(item=><label className="check" key={item.user_object_code}><input type="checkbox" checked={form.allowed_target_codes.includes(item.user_object_code)} onChange={()=>setForm({...form,allowed_target_codes:toggle(form.allowed_target_codes,item.user_object_code)})}/><span><b>{item.account_name}{item.enabled?'':'（已停用）'}</b><code>{item.user_object_code}</code><small className={item.description?'':'empty-description'}>用途：{item.description||'未填写，授权前请先确认收件范围'}</small><small>已绑定 {item.bound_count} · 待绑定 {item.pending_count} · 异常 {item.unhealthy_count}</small></span></label>):<p className="muted">当前公司还没有用户对象；可明确选择“允许公司全部对象”后先创建接入。</p>}</div>}</fieldset>
    {error&&<p className="form-error" role="alert">{error}。已保留输入，请检查权限和对象后重试。</p>}<div className="form-actions"><button className="primary" type="submit" disabled={!!busy}>{busy==='save'?'保存中…':editing?'保存修改':'创建并显示接入凭据'}</button><button className="ghost" type="button" onClick={reset} disabled={!!busy}>取消</button></div>
   </form>}
   {!open&&error&&<p className="form-error" role="alert">{error}。请刷新状态后重试。</p>}
