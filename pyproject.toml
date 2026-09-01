@@ -1,0 +1,60 @@
+[project]
+name = "weixin-bot-notification-platform"
+version = "0.2.0"
+description = "Multi-tenant personal Weixin Bot notification platform"
+readme = "README.md"
+authors = [{ name = "猫王AI" }]
+maintainers = [{ name = "猫王AI" }]
+license = { file = "LICENSE" }
+keywords = ["weixin", "wechat", "bot", "notification", "fastapi", "multi-tenant"]
+requires-python = ">=3.12"
+dependencies = [
+  "aiohttp>=3.12,<4",
+  "alembic>=1.13,<2",
+  "cryptography>=43,<46",
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "itsdangerous>=2.2,<3",
+  "jinja2>=3.1,<4",
+  "pwdlib[argon2]>=0.2,<1",
+  "python-multipart>=0.0.20,<1",
+  "qrcode[pil]>=8.2,<9",
+  "sqlalchemy>=2.0,<3",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.urls]
+Homepage = "https://github.com/guwangxian-ai/weixin-bot-notification-platform"
+Repository = "https://github.com/guwangxian-ai/weixin-bot-notification-platform"
+Issues = "https://github.com/guwangxian-ai/weixin-bot-notification-platform/issues"
+
+[dependency-groups]
+dev = [
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "ruff>=0.12,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --disable-warnings"
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["S101", "B008"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = false
+plugins = ["sqlalchemy.ext.mypy.plugin"]
+exclude = ["alembic"]
+ignore_missing_imports = true
+disallow_untyped_defs = false
+warn_return_any = false
+check_untyped_defs = true

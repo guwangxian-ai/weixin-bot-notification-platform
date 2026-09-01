@@ -1,0 +1,1 @@
+"""Weixin Bot notification system."""

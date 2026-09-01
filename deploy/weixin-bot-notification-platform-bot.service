@@ -1,0 +1,26 @@
+[Unit]
+Description=Weixin Bot Notification Platform Workers
+After=network-online.target weixin-bot-notification-platform.service
+Wants=network-online.target
+Requires=weixin-bot-notification-platform.service
+
+[Service]
+Type=simple
+User=weixinbot
+Group=weixinbot
+WorkingDirectory=/opt/weixin-bot-notification-platform
+EnvironmentFile=/etc/weixin-bot-notification-platform.env
+Environment=PATH=/opt/weixin-bot-notification-platform/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/weixin-bot-notification-platform/.venv/bin/python -m app.bot_worker
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/weixin-bot-notification-platform/data /opt/weixin-bot-notification-platform/logs /var/lib/weixin-bot-notification-platform/gateway-locks
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

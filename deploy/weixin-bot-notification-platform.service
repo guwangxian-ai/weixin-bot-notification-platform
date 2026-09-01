@@ -1,0 +1,28 @@
+[Unit]
+Description=Weixin Bot Notification Platform API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=weixinbot
+Group=weixinbot
+WorkingDirectory=/opt/weixin-bot-notification-platform
+EnvironmentFile=/etc/weixin-bot-notification-platform.env
+Environment=PATH=/opt/weixin-bot-notification-platform/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStartPre=/usr/bin/install -d -m 0750 -o weixinbot -g weixinbot /opt/weixin-bot-notification-platform/data /opt/weixin-bot-notification-platform/uploads /opt/weixin-bot-notification-platform/logs /opt/weixin-bot-notification-platform/backups
+ExecStartPre=/opt/weixin-bot-notification-platform/.venv/bin/alembic upgrade head
+ExecStart=/opt/weixin-bot-notification-platform/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8091 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/weixin-bot-notification-platform/data /opt/weixin-bot-notification-platform/uploads /opt/weixin-bot-notification-platform/logs /opt/weixin-bot-notification-platform/backups
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
