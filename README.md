@@ -6,6 +6,8 @@
 [![Python](https://img.shields.io/badge/Python-3.12-blue.svg)](pyproject.toml)
 [![React](https://img.shields.io/badge/React-18-61dafb.svg)](web/package.json)
 
+[💚 如果项目对你有用，欢迎支持开源维护](#支持项目)
+
 一个行业无关、支持多公司租户的通知基础设施。管理员可创建用户对象，为每个用户绑定多个独立微信 Bot，并通过管理界面或 API 向用户发送文字、图片、文件、视频、任务提醒和系统告警。一个用户绑定了几个 Bot，通知就会扇出到几个 Bot。
 
 ## 核心能力
@@ -135,6 +137,16 @@ APP_DATABASE_URL=sqlite:////tmp/weixin-bot-platform.db .venv/bin/alembic upgrade
 - [贡献指南](CONTRIBUTING.md)
 - [安全政策](SECURITY.md)
 - [第三方说明](THIRD_PARTY_NOTICES.md)
+
+## 支持项目
+
+如果这个项目对你有帮助，欢迎赞助猫王AI继续维护和完善这个开源项目。感谢你的认可与支持！
+
+<p align="center">
+  <img src="docs/assets/wechat-pay-maowang-ai.png" alt="猫王AI微信赞助收款码" width="360">
+</p>
+
+> 赞助完全自愿，不影响项目功能使用、Issue 处理或 Pull Request 审核。
 
 ## License
 

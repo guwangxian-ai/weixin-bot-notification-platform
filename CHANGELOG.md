@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的组织方式。
 
+## [Unreleased]
+
+### 新增
+
+- README 中的自愿开源赞助说明和微信收款码。
+
 ## [0.2.0] - 2026-09-01
 
 ### 新增
