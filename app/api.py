@@ -324,20 +324,16 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                     relative_path == "/authorized-companies"
                     or relative_path.startswith("/notification-targets")
                     or (
-                        relative_path.startswith("/companies/")
-                        and "/user-objects" in relative_path
+                        relative_path.startswith("/companies/") and "/user-objects" in relative_path
                     )
                 ):
                     required_permission = "query"
-                elif request.method == "GET" and relative_path.startswith(
-                    "/notification-batches"
-                ):
+                elif request.method == "GET" and relative_path.startswith("/notification-batches"):
                     required_permission = "status"
                 elif request.method == "POST" and relative_path == "/notifications/preview":
                     required_permission = "query"
                 elif request.method == "POST" and (
-                    relative_path == "/notifications/send"
-                    or relative_path == "/media-assets"
+                    relative_path == "/notifications/send" or relative_path == "/media-assets"
                 ):
                     required_permission = "send"
                 if (
@@ -443,6 +439,25 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             )
         )
 
+    def bot_binding_delivery_ready(binding: EmployeeBotBinding | None) -> bool:
+        """iLink requires an inbound context before a newly paired Bot can send."""
+        return bool(
+            binding
+            and binding.active
+            and binding.chat_id_encrypted
+            and binding.context_token_encrypted
+        )
+
+    def bot_binding_sendable(
+        binding: EmployeeBotBinding | None,
+        account: WeixinBotAccount | None,
+    ) -> bool:
+        return bool(
+            bot_binding_delivery_ready(binding)
+            and account
+            and account.health_status not in {BotHealthStatus.DEGRADED, BotHealthStatus.REVOKED}
+        )
+
     def available_video_path(asset: VideoAsset) -> Path | None:
         path = Path(asset.storage_path).resolve()
         upload_root = settings.upload_dir.resolve()
@@ -450,12 +465,20 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             return None
         return path
 
-    def binding_session_json(item: WeixinBindingSession) -> dict[str, Any]:
+    def binding_session_json(
+        item: WeixinBindingSession,
+        session: Session | None = None,
+    ) -> dict[str, Any]:
         live = item.status in {
             BindingSessionStatus.PENDING,
             BindingSessionStatus.SCANNED,
             BindingSessionStatus.CONFIRMING,
         }
+        delivery_ready = None
+        if item.status == BindingSessionStatus.BOUND and session is not None:
+            delivery_ready = bot_binding_delivery_ready(
+                active_bot_binding(session, item.employee_id)
+            )
         return {
             "id": item.id,
             "company_id": item.company_id,
@@ -463,16 +486,13 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             "status": item.status.value,
             "expires_at": item.expires_at,
             "qr_image_url": (
-                f"{settings.base_path}/api/v1/binding-sessions/{item.id}/qr.png"
-                if live
-                else None
+                f"{settings.base_path}/api/v1/binding-sessions/{item.id}/qr.png" if live else None
             ),
             "failure_code": item.failure_code,
+            "delivery_ready": delivery_ready,
         }
 
-    def latest_binding_session(
-        session: Session, employee_id: str
-    ) -> WeixinBindingSession | None:
+    def latest_binding_session(session: Session, employee_id: str) -> WeixinBindingSession | None:
         return session.scalar(
             select(WeixinBindingSession)
             .where(WeixinBindingSession.employee_id == employee_id)
@@ -597,9 +617,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                         else BotHealthStatus.UNKNOWN.value
                     ),
                     "last_health_at": bot_account.last_health_at if bot_account else None,
-                    "delivery_ready": bool(
-                        bot_binding.context_token_encrypted and bot_binding.chat_id_encrypted
-                    ),
+                    "delivery_ready": bot_binding_delivery_ready(bot_binding),
                     "welcome_delivery": delivery_summary(welcome),
                     "manual_test": {
                         "allowed": manual_test_allowed,
@@ -624,7 +642,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             ),
         }
         if include_management:
-            result["binding_session"] = binding_session_json(latest) if latest else None
+            result["binding_session"] = binding_session_json(latest, session) if latest else None
         return result
 
     def delivery_json(item: Delivery) -> dict[str, Any]:
@@ -675,10 +693,12 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             return False, "员工账号未启用", None
         if binding is None or not binding.active:
             return False, "员工尚未绑定微信 Bot", None
-        if account is None or account.health_status != BotHealthStatus.HEALTHY:
-            return False, "微信 Bot 当前不是健康状态", None
-        if not binding.context_token_encrypted or not binding.chat_id_encrypted:
-            return False, "微信 Bot 会话尚未激活", None
+        if account is None:
+            return False, "微信 Bot 凭据已失效", None
+        if account.health_status in {BotHealthStatus.DEGRADED, BotHealthStatus.REVOKED}:
+            return False, "微信 Bot 当前不可用", None
+        if not bot_binding_delivery_ready(binding):
+            return False, "请先在微信 Bot 会话中发送任意消息完成会话初始化", None
         if binding.last_manual_test_at is not None:
             remaining = 60 - int((utcnow() - aware(binding.last_manual_test_at)).total_seconds())
             if remaining > 0:
@@ -740,9 +760,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             .where(
                 Delivery.id == item.id,
                 Delivery.dispatch_token == item.dispatch_token,
-                Delivery.status.in_(
-                    {DeliveryStatus.SENDING, DeliveryStatus.RETRYING}
-                ),
+                Delivery.status.in_({DeliveryStatus.SENDING, DeliveryStatus.RETRYING}),
             )
             .values(dispatch_lease_expires_at=dispatch_lease_deadline())
         )
@@ -766,9 +784,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         else:
             bot_binding = None
         legacy = (
-            active_legacy_binding(session, item.employee_id)
-            if item.binding_id is None
-            else None
+            active_legacy_binding(session, item.employee_id) if item.binding_id is None else None
         )
         if item.binding_id is None and legacy is None:
             item.status = DeliveryStatus.FAILED
@@ -779,21 +795,16 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             item.status = DeliveryStatus.FAILED
             item.failure_code = "mock_failure"
             item.failure_message = "模拟发送失败，可由管理员重试"
-        elif (
-            bot_binding is not None
-            and (not bot_binding.context_token_encrypted or not bot_binding.chat_id_encrypted)
-        ) or (
+        elif (bot_binding is not None and not bot_binding_delivery_ready(bot_binding)) or (
             bot_binding is None and (legacy is None or not legacy.context_token_encrypted)
         ):
             item.status = DeliveryStatus.WAITING_INTERACTION
             item.failure_code = "context_required"
-            item.failure_message = "等待员工首次私信通知 Bot 建立微信会话后自动补发"
+            item.failure_message = "等待用户在微信 Bot 会话发送首条消息后自动补发"
         elif settings.delivery_mode == "weixin":
             from app.weixin_delivery import send_video
 
-            asset = (
-                session.get(VideoAsset, item.video_asset_id) if item.video_asset_id else None
-            )
+            asset = session.get(VideoAsset, item.video_asset_id) if item.video_asset_id else None
             if bot_binding is None:
                 item.status = DeliveryStatus.FAILED
                 item.failure_code = "bot_binding_unavailable"
@@ -813,9 +824,9 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                 return
             encrypted_context = bot_binding.context_token_encrypted
             if not encrypted_context:
-                item.status = DeliveryStatus.FAILED
-                item.failure_code = "bot_conversation_unavailable"
-                item.failure_message = "员工微信 Bot 会话已失效，请重新互动"
+                item.status = DeliveryStatus.WAITING_INTERACTION
+                item.failure_code = "context_required"
+                item.failure_message = "等待用户在微信 Bot 会话发送首条消息后自动补发"
                 return
             try:
                 account_id = cipher.decrypt(bot_account.account_id_encrypted.encode()).decode()
@@ -846,15 +857,14 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                 item.failure_code = "video_file_unavailable"
                 item.failure_message = "视频文件已不存在或不可用"
                 return
+
             def fail_from_outcome(outcome: Any) -> None:
                 failed = session.execute(
                     update(Delivery)
                     .where(
                         Delivery.id == item.id,
                         Delivery.dispatch_token == item.dispatch_token,
-                        Delivery.status.in_(
-                            {DeliveryStatus.SENDING, DeliveryStatus.RETRYING}
-                        ),
+                        Delivery.status.in_({DeliveryStatus.SENDING, DeliveryStatus.RETRYING}),
                     )
                     .values(
                         status=DeliveryStatus.FAILED,
@@ -873,6 +883,10 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                 session.refresh(item)
                 if getattr(failed, "rowcount", 0) != 1:
                     return
+                if outcome.error_code != "weixin_rate_limited":
+                    bot_account.health_status = BotHealthStatus.DEGRADED
+                    bot_account.last_health_at = utcnow()
+                    session.commit()
 
             if asset is not None and item.media_sent_at is None:
                 if not renew_dispatch_lease(session, item):
@@ -910,9 +924,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                     .where(
                         Delivery.id == item.id,
                         Delivery.dispatch_token == item.dispatch_token,
-                        Delivery.status.in_(
-                            {DeliveryStatus.SENDING, DeliveryStatus.RETRYING}
-                        ),
+                        Delivery.status.in_({DeliveryStatus.SENDING, DeliveryStatus.RETRYING}),
                     )
                     .values(**media_values)
                 )
@@ -921,6 +933,8 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                     session.refresh(item)
                     return
                 asset.consumed_at = asset.consumed_at or completed_at
+                bot_account.health_status = BotHealthStatus.HEALTHY
+                bot_account.last_health_at = completed_at
                 session.commit()
                 session.refresh(item)
                 cleanup_consumed_video_file(session, item)
@@ -946,14 +960,11 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                     .where(
                         Delivery.id == item.id,
                         Delivery.dispatch_token == item.dispatch_token,
-                        Delivery.status.in_(
-                            {DeliveryStatus.SENDING, DeliveryStatus.RETRYING}
-                        ),
+                        Delivery.status.in_({DeliveryStatus.SENDING, DeliveryStatus.RETRYING}),
                     )
                     .values(
                         text_sent_at=utcnow(),
-                        external_message_id=text_outcome.message_id
-                        or item.external_message_id,
+                        external_message_id=text_outcome.message_id or item.external_message_id,
                         failure_code=None,
                         failure_message=None,
                         next_retry_at=None,
@@ -966,11 +977,15 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                     session.rollback()
                     session.refresh(item)
                     return
+                bot_account.health_status = BotHealthStatus.HEALTHY
+                bot_account.last_health_at = utcnow()
                 session.commit()
                 session.refresh(item)
-            if (not message or item.text_sent_at is not None) and (
-                asset is None or item.media_sent_at is not None
-            ) and item.status in {DeliveryStatus.SENDING, DeliveryStatus.RETRYING}:
+            if (
+                (not message or item.text_sent_at is not None)
+                and (asset is None or item.media_sent_at is not None)
+                and item.status in {DeliveryStatus.SENDING, DeliveryStatus.RETRYING}
+            ):
                 finalized = session.execute(
                     update(Delivery)
                     .where(
@@ -985,6 +1000,9 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                 )
                 session.commit()
                 if getattr(finalized, "rowcount", 0) == 1:
+                    bot_account.health_status = BotHealthStatus.HEALTHY
+                    bot_account.last_health_at = utcnow()
+                    session.commit()
                     session.refresh(item)
         else:
             item.status = DeliveryStatus.SIMULATED
@@ -1025,9 +1043,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                     .where(
                         Delivery.id == item.id,
                         Delivery.dispatch_token == exception_token,
-                        Delivery.status.in_(
-                            {DeliveryStatus.SENDING, DeliveryStatus.RETRYING}
-                        ),
+                        Delivery.status.in_({DeliveryStatus.SENDING, DeliveryStatus.RETRYING}),
                     )
                     .values(
                         status=DeliveryStatus.FAILED,
@@ -1061,9 +1077,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                 .where(
                     Delivery.id == item.id,
                     Delivery.dispatch_token == claim_token,
-                    Delivery.status.in_(
-                        {DeliveryStatus.SENDING, DeliveryStatus.RETRYING}
-                    ),
+                    Delivery.status.in_({DeliveryStatus.SENDING, DeliveryStatus.RETRYING}),
                 )
                 .values(**outcome_values)
             )
@@ -1138,8 +1152,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                     Delivery.status == DeliveryStatus.WAITING_INTERACTION,
                     and_(
                         Delivery.status == DeliveryStatus.PENDING,
-                        Delivery.notification_type
-                        == NotificationType.BINDING_WELCOME.value,
+                        Delivery.notification_type == NotificationType.BINDING_WELCOME.value,
                     ),
                 ),
             )
@@ -1154,8 +1167,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                         Delivery.status == DeliveryStatus.WAITING_INTERACTION,
                         and_(
                             Delivery.status == DeliveryStatus.PENDING,
-                            Delivery.notification_type
-                            == NotificationType.BINDING_WELCOME.value,
+                            Delivery.notification_type == NotificationType.BINDING_WELCOME.value,
                         ),
                     ),
                 )
@@ -1336,8 +1348,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             )
         if "send" in permissions:
             steps.append(
-                f"{len(steps) + 1}. `POST {api_base_url}/notifications/send` "
-                "使用稳定幂等键发送。"
+                f"{len(steps) + 1}. `POST {api_base_url}/notifications/send` 使用稳定幂等键发送。"
             )
         else:
             steps.append(f"{len(steps) + 1}. 当前凭据没有 `send` 权限，不得尝试发送通知。")
@@ -1420,8 +1431,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             )
         else:
             curl_lines.append(
-                "# 当前凭据只有 send 权限；为避免真实通知，自检只检查服务健康，"
-                "不发送测试消息。"
+                "# 当前凭据只有 send 权限；为避免真实通知，自检只检查服务健康，不发送测试消息。"
             )
         curl_check = "\n".join(curl_lines)
         return {
@@ -1497,11 +1507,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                     Employee.status == EmployeeStatus.ACTIVE,
                 )
             ).first()
-            return (
-                [(compatibility_row[0], compatibility_row[1], None)]
-                if compatibility_row
-                else []
-            )
+            return [(compatibility_row[0], compatibility_row[1], None)] if compatibility_row else []
         if item.mode == TargetMode.DYNAMIC_ALL:
             rows = session.execute(
                 select(EmployeeBotBinding, WeixinBotAccount)
@@ -1554,7 +1560,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             "enabled": item.enabled,
             "member_count": len(members),
             "healthy_count": sum(
-                account.health_status == BotHealthStatus.HEALTHY for _, account, _ in members
+                bot_binding_sendable(binding, account) for binding, account, _ in members
             ),
             "last_send_status": batch_json(session, latest)["status"] if latest else None,
             "created_at": item.created_at,
@@ -1625,9 +1631,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             delivery.status in {DeliveryStatus.FAILED, DeliveryStatus.CANCELLED}
             for delivery, _ in rows
         )
-        simulated_count = sum(
-            delivery.status == DeliveryStatus.SIMULATED for delivery, _ in rows
-        )
+        simulated_count = sum(delivery.status == DeliveryStatus.SIMULATED for delivery, _ in rows)
         terminal_count = sent_count + failed_count + simulated_count
         if terminal_count < len(rows):
             aggregate_status = BatchStatus.PENDING
@@ -1664,9 +1668,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             ],
         }
 
-    def recover_pending_batch(
-        session: Session, item: NotificationBatch, user: User
-    ) -> None:
+    def recover_pending_batch(session: Session, item: NotificationBatch, user: User) -> None:
         pending_ids = session.scalars(
             select(Delivery.id).where(
                 Delivery.batch_id == item.id,
@@ -1683,9 +1685,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             session.commit()
 
     @router.get("/companies", tags=["companies"])
-    def list_companies(
-        session: Session = Depends(get_session), user: User = Depends(current_user)
-    ):
+    def list_companies(session: Session = Depends(get_session), user: User = Depends(current_user)):
         query = select(Company).where(Company.deleted_at.is_(None))
         if user.role != Role.SUPER_ADMIN:
             query = query.where(Company.id == user.company_id)
@@ -1771,9 +1771,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             for binding, account, employee in rows
         ]
 
-    def resolve_user_object_company(
-        session: Session, user: User, company_ref: str
-    ) -> Company:
+    def resolve_user_object_company(session: Session, user: User, company_ref: str) -> Company:
         company = session.scalar(
             select(Company).where(
                 or_(Company.id == company_ref, Company.slug == company_ref),
@@ -1785,9 +1783,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         tenant(user, company.id)
         return company
 
-    def resolve_user_object(
-        session: Session, company: Company, code: str
-    ) -> NotificationTarget:
+    def resolve_user_object(session: Session, company: Company, code: str) -> NotificationTarget:
         item = session.scalar(
             select(NotificationTarget).where(
                 NotificationTarget.company_id == company.id,
@@ -1799,9 +1795,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             raise HTTPException(404, "用户对象不存在")
         return item
 
-    def user_object_employees(
-        session: Session, item: NotificationTarget
-    ) -> list[Employee]:
+    def user_object_employees(session: Session, item: NotificationTarget) -> list[Employee]:
         if item.is_user_object:
             return list(
                 session.scalars(
@@ -1823,10 +1817,12 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         if item.mode == TargetMode.DYNAMIC_ALL:
             return list(
                 session.scalars(
-                    select(Employee).where(
+                    select(Employee)
+                    .where(
                         Employee.company_id == item.company_id,
                         Employee.status == EmployeeStatus.ACTIVE,
-                    ).order_by(Employee.created_at)
+                    )
+                    .order_by(Employee.created_at)
                 ).all()
             )
         rows = session.scalars(
@@ -1854,12 +1850,10 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         include_binding_session: bool = True,
     ) -> dict[str, Any]:
         binding = (
-            supplied_binding
-            if use_supplied_binding
-            else active_bot_binding(session, employee.id)
+            supplied_binding if use_supplied_binding else active_bot_binding(session, employee.id)
         )
         account = session.get(WeixinBotAccount, binding.bot_account_id) if binding else None
-        test_allowed, _test_reason, _retry_after = manual_test_availability(
+        test_allowed, test_reason, retry_after = manual_test_availability(
             employee, binding, account, can_manage=can_manage
         )
         binding_session = session.scalar(
@@ -1881,7 +1875,12 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                     "health_status": account.health_status.value if account else "unknown",
                     "bot_masked": account.account_id_masked if account else None,
                     "last_test_at": binding.last_manual_test_at,
-                    "manual_test": {"allowed": test_allowed},
+                    "delivery_ready": bot_binding_delivery_ready(binding),
+                    "manual_test": {
+                        "allowed": test_allowed,
+                        "reason": test_reason,
+                        "retry_after_seconds": retry_after,
+                    },
                 }
                 if binding
                 else None
@@ -1889,7 +1888,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         }
         if can_manage and include_binding_session:
             result["binding_session"] = (
-                binding_session_json(binding_session) if binding_session else None
+                binding_session_json(binding_session, session) if binding_session else None
             )
         if can_manage and employee.phone_encrypted:
             try:
@@ -1943,6 +1942,10 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             session.get(WeixinBotAccount, binding.bot_account_id) if binding else None
             for binding in bindings
         ]
+        activating = [
+            bool(binding and account and not bot_binding_delivery_ready(binding))
+            for binding, account in zip(bindings, accounts, strict=True)
+        ]
         last_test_at = max(
             (
                 binding.last_manual_test_at
@@ -1964,10 +1967,17 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             "all_available": item.mode == TargetMode.DYNAMIC_ALL,
             "bound_count": sum(binding is not None for binding in bindings),
             "pending_count": sum(binding is None for binding in bindings),
+            "activating_count": sum(activating),
             "unhealthy_count": sum(
                 binding is not None
-                and (account is None or account.health_status != BotHealthStatus.HEALTHY)
-                for binding, account in zip(bindings, accounts, strict=True)
+                and not is_activating
+                and (
+                    account is None
+                    or account.health_status in {BotHealthStatus.DEGRADED, BotHealthStatus.REVOKED}
+                )
+                for binding, account, is_activating in zip(
+                    bindings, accounts, activating, strict=True
+                )
             ),
             "last_test_at": last_test_at,
             "contacts": [
@@ -2001,10 +2011,12 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         company = resolve_user_object_company(session, user, company_ref)
         require_api_permission(request, "query")
         rows = session.scalars(
-            select(NotificationTarget).where(
+            select(NotificationTarget)
+            .where(
                 NotificationTarget.company_id == company.id,
                 NotificationTarget.deleted_at.is_(None),
-            ).order_by(NotificationTarget.created_at)
+            )
+            .order_by(NotificationTarget.created_at)
         ).all()
         api_client = getattr(request.state, "api_client", None)
         if api_client and api_client.allowed_target_codes:
@@ -2012,9 +2024,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         can_manage = user_object_can_manage(request, user)
         return [user_object_json(session, item, can_manage=can_manage) for item in rows]
 
-    @router.post(
-        "/companies/{company_ref}/user-objects", status_code=201, tags=["user-objects"]
-    )
+    @router.post("/companies/{company_ref}/user-objects", status_code=201, tags=["user-objects"])
     def create_user_object(
         company_ref: str,
         payload: UserObjectCreate,
@@ -2040,9 +2050,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             raise HTTPException(409, "该公司下调用标识已存在") from exc
         return user_object_json(session, item, can_manage=True)
 
-    @router.get(
-        "/companies/{company_ref}/user-objects/{user_object_code}", tags=["user-objects"]
-    )
+    @router.get("/companies/{company_ref}/user-objects/{user_object_code}", tags=["user-objects"])
     def get_user_object(
         company_ref: str,
         user_object_code: str,
@@ -2053,13 +2061,9 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         company = resolve_user_object_company(session, user, company_ref)
         require_api_permission(request, "query", user_object_code)
         item = resolve_user_object(session, company, user_object_code)
-        return user_object_json(
-            session, item, can_manage=user_object_can_manage(request, user)
-        )
+        return user_object_json(session, item, can_manage=user_object_can_manage(request, user))
 
-    @router.patch(
-        "/companies/{company_ref}/user-objects/{user_object_code}", tags=["user-objects"]
-    )
+    @router.patch("/companies/{company_ref}/user-objects/{user_object_code}", tags=["user-objects"])
     def update_user_object(
         company_ref: str,
         user_object_code: str,
@@ -2380,10 +2384,12 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             raise HTTPException(422, "company_id required")
         tenant(user, scope)
         rows = session.scalars(
-            select(NotificationTarget).where(
+            select(NotificationTarget)
+            .where(
                 NotificationTarget.company_id == scope,
                 NotificationTarget.deleted_at.is_(None),
-            ).order_by(NotificationTarget.created_at)
+            )
+            .order_by(NotificationTarget.created_at)
         ).all()
         client = getattr(request.state, "api_client", None)
         if client and client.allowed_target_codes:
@@ -2683,16 +2689,16 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             "description": item.description,
             "bot_count": len(members),
             "healthy_count": sum(
-                account.health_status == BotHealthStatus.HEALTHY for _, account, _ in members
+                bot_binding_sendable(binding, account) for binding, account, _ in members
             ),
             "bots": [
                 {
                     "bot_id": account.id,
                     "bot_masked": account.account_id_masked,
                     "health_status": account.health_status.value,
-                    "sendable": account.health_status == BotHealthStatus.HEALTHY,
+                    "sendable": bot_binding_sendable(binding, account),
                 }
-                for _, account, _ in members
+                for binding, account, _ in members
             ],
         }
 
@@ -2706,9 +2712,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
     ):
         if settings.environment != "test" and settings.delivery_mode != "weixin":
             raise HTTPException(409, "当前运行模式不允许正式发送通知")
-        company, item, members = resolve_target_for_request(
-            session, request, user, payload, "send"
-        )
+        company, item, members = resolve_target_for_request(session, request, user, payload, "send")
         normalized = json.dumps(
             {
                 "company": company.id,
@@ -2735,7 +2739,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             recover_pending_batch(session, existing, user)
             response.status_code = 200
             return batch_json(session, existing)
-        ready = [row for row in members if row[1].health_status == BotHealthStatus.HEALTHY]
+        ready = [row for row in members if bot_binding_sendable(row[0], row[1])]
         if not ready:
             raise HTTPException(409, "通知对象没有健康且可发送的微信 Bot")
         asset = session.get(VideoAsset, payload.media_asset_id) if payload.media_asset_id else None
@@ -2840,9 +2844,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             audit_delivery_failure(session, user, delivery)
             session.commit()
         sent = sum(delivery.status == DeliveryStatus.SENT for delivery in deliveries)
-        simulated = sum(
-            delivery.status == DeliveryStatus.SIMULATED for delivery in deliveries
-        )
+        simulated = sum(delivery.status == DeliveryStatus.SIMULATED for delivery in deliveries)
         failed = sum(
             delivery.status
             not in {
@@ -2857,8 +2859,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         batch.status = (
             BatchStatus.SIMULATED
             if simulated == len(deliveries) and failed == 0 and batch.skipped_count == 0
-            else
-            BatchStatus.COMPLETED
+            else BatchStatus.COMPLETED
             if failed == 0 and batch.skipped_count == 0
             else BatchStatus.PARTIAL
             if sent > 0 or simulated > 0
@@ -2971,9 +2972,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         query = select(Employee).where(Employee.status != EmployeeStatus.DELETED)
         if scope:
             query = query.where(Employee.company_id == scope)
-        include_management = not bool(
-            getattr(request.state, "business_service_company_id", None)
-        )
+        include_management = not bool(getattr(request.state, "business_service_company_id", None))
         return [
             employee_json(
                 session,
@@ -3084,9 +3083,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         session.commit()
         return {"ok": True}
 
-    @router.post(
-        "/employees/{employee_id}/binding-sessions", status_code=201, tags=["binding"]
-    )
+    @router.post("/employees/{employee_id}/binding-sessions", status_code=201, tags=["binding"])
     def create_binding_session(
         employee_id: str,
         session: Session = Depends(get_session),
@@ -3098,7 +3095,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         tenant(user, employee.company_id)
         item = create_binding_session_record(session, employee, user)
         session.commit()
-        return binding_session_json(item)
+        return binding_session_json(item, session)
 
     def authorized_binding_session(
         session_id: str, session: Session, user: User
@@ -3113,11 +3110,15 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         expires = item.expires_at
         if expires.tzinfo is None:
             expires = expires.replace(tzinfo=UTC)
-        if item.status in {
-            BindingSessionStatus.PENDING,
-            BindingSessionStatus.SCANNED,
-            BindingSessionStatus.CONFIRMING,
-        } and expires <= utcnow():
+        if (
+            item.status
+            in {
+                BindingSessionStatus.PENDING,
+                BindingSessionStatus.SCANNED,
+                BindingSessionStatus.CONFIRMING,
+            }
+            and expires <= utcnow()
+        ):
             item.status = BindingSessionStatus.EXPIRED
             item.failure_code = "expired"
             return True
@@ -3132,7 +3133,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         item = authorized_binding_session(session_id, session, user)
         if mark_expired(item):
             session.commit()
-        return binding_session_json(item)
+        return binding_session_json(item, session)
 
     @router.get("/binding-sessions/{session_id}/qr.png", tags=["binding"])
     def binding_qr(
@@ -3169,7 +3170,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             item = authorized_binding_session(session_id, session, user)
             if mark_expired(item):
                 session.commit()
-                return binding_session_json(item)
+                return binding_session_json(item, session)
             if item.status not in {
                 BindingSessionStatus.PENDING,
                 BindingSessionStatus.SCANNED,
@@ -3179,7 +3180,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                     current_binding = active_bot_binding(session, item.employee_id)
                     if current_binding is not None:
                         dispatch_binding_welcome(session, current_binding.id)
-                return binding_session_json(item)
+                return binding_session_json(item, session)
             from app.ilink_binding import IlinkQrAdapter, IlinkStatus
 
             outcome = None
@@ -3211,7 +3212,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             if getattr(claim, "rowcount", 0) != 1:
                 session.rollback()
                 latest = authorized_binding_session(session_id, session, user)
-                return binding_session_json(latest)
+                return binding_session_json(latest, session)
             session.expire_all()
             item = authorized_binding_session(session_id, session, user)
             if poll_failed:
@@ -3219,7 +3220,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                 item.failure_code = "official_poll_failed"
                 audit(session, user, "binding_session.failed", item, item.company_id)
                 session.commit()
-                return binding_session_json(item)
+                return binding_session_json(item, session)
             assert outcome is not None
             if outcome.current_base_url:
                 item.current_base_url_encrypted = enc(outcome.current_base_url)
@@ -3252,7 +3253,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                             item.status = BindingSessionStatus.FAILED
                             item.failure_code = "bot_account_company_mismatch"
                             session.commit()
-                            return binding_session_json(item)
+                            return binding_session_json(item, session)
                         occupied = session.scalar(
                             select(EmployeeBotBinding).where(
                                 EmployeeBotBinding.bot_account_id == account.id,
@@ -3263,7 +3264,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                             item.status = BindingSessionStatus.FAILED
                             item.failure_code = "bot_account_already_bound"
                             session.commit()
-                            return binding_session_json(item)
+                            return binding_session_json(item, session)
                         account.account_id_encrypted = enc(outcome.account_id)
                         account.bot_token_encrypted = enc(outcome.token)
                         account.base_url_encrypted = enc(outcome.base_url)
@@ -3287,6 +3288,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                             company_id=employee.company_id,
                             employee_id=employee.id,
                             bot_account_id=account.id,
+                            chat_id_encrypted=enc(outcome.user_id),
                         )
                         session.add(created_binding)
                         session.flush()
@@ -3300,18 +3302,18 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                 session.rollback()
                 current = session.get(WeixinBindingSession, session_id)
                 if current and current.status == BindingSessionStatus.BOUND:
-                    return binding_session_json(current)
+                    return binding_session_json(current, session)
                 if current:
                     current.status = BindingSessionStatus.FAILED
                     current.failure_code = "concurrent_binding_conflict"
                     session.commit()
-                    return binding_session_json(current)
+                    return binding_session_json(current, session)
                 raise HTTPException(409, "Binding session conflict") from None
             if item.status == BindingSessionStatus.BOUND:
                 current_binding = active_bot_binding(session, item.employee_id)
                 if current_binding is not None:
                     dispatch_binding_welcome(session, current_binding.id)
-            return binding_session_json(item)
+            return binding_session_json(item, session)
 
     @router.post("/binding-sessions/{session_id}/cancel", tags=["binding"])
     def cancel_binding_session(
@@ -3347,7 +3349,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         else:
             session.rollback()
             item = authorized_binding_session(session_id, session, user)
-        return binding_session_json(item)
+        return binding_session_json(item, session)
 
     @router.post("/employees/{employee_id}/binding-code", status_code=201, tags=["binding"])
     def binding_code(
@@ -3464,11 +3466,10 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         )
         binding_session = create_binding_session_record(session, employee, user)
         session.commit()
-        return binding_session_json(binding_session)
+        return binding_session_json(binding_session, session)
 
     @router.post(
-        "/companies/{company_ref}/user-objects/{user_object_code}/contacts/"
-        "{employee_id}/unbind",
+        "/companies/{company_ref}/user-objects/{user_object_code}/contacts/{employee_id}/unbind",
         tags=["user-objects"],
     )
     def unbind_user_object_contact(
@@ -3479,9 +3480,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         session: Session = Depends(get_session),
         user: User = Depends(platform_writable),
     ):
-        require_user_object_contact(
-            session, user, company_ref, user_object_code, employee_id
-        )
+        require_user_object_contact(session, user, company_ref, user_object_code, employee_id)
         return unbind(employee_id, payload, session, user)
 
     @router.post("/binding-transfers", tags=["binding"])
@@ -3519,6 +3518,10 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         )
         if occupied and occupied.employee_id != source.id:
             raise HTTPException(409, "Weixin Bot is assigned to another employee")
+        source_account = session.get(WeixinBotAccount, source_binding.bot_account_id)
+        direct_chat_encrypted = source_binding.chat_id_encrypted or (
+            source_account.owner_user_id_encrypted if source_account else None
+        )
         session.execute(
             update(EmployeeBotBinding)
             .where(EmployeeBotBinding.id == source_binding.id)
@@ -3533,6 +3536,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             company_id=target.company_id,
             employee_id=target.id,
             bot_account_id=source_binding.bot_account_id,
+            chat_id_encrypted=direct_chat_encrypted,
         )
         session.add(created)
         session.flush()
@@ -3725,16 +3729,14 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         )
         is_webm = suffix == ".webm" and first_chunk.startswith(b"\x1aE\xdf\xa3")
         is_image = (
-            suffix == ".png" and first_chunk.startswith(b"\x89PNG\r\n\x1a\n")
-        ) or (
-            suffix in {".jpg", ".jpeg"} and first_chunk.startswith(b"\xff\xd8\xff")
-        ) or (suffix == ".gif" and first_chunk.startswith((b"GIF87a", b"GIF89a")))
+            (suffix == ".png" and first_chunk.startswith(b"\x89PNG\r\n\x1a\n"))
+            or (suffix in {".jpg", ".jpeg"} and first_chunk.startswith(b"\xff\xd8\xff"))
+            or (suffix == ".gif" and first_chunk.startswith((b"GIF87a", b"GIF89a")))
+        )
         is_document = (
-            suffix == ".pdf" and first_chunk.startswith(b"%PDF-")
-        ) or (
-            suffix in {".docx", ".xlsx"} and first_chunk.startswith(b"PK\x03\x04")
-        ) or (
-            suffix in {".txt", ".csv"} and b"\x00" not in first_chunk
+            (suffix == ".pdf" and first_chunk.startswith(b"%PDF-"))
+            or (suffix in {".docx", ".xlsx"} and first_chunk.startswith(b"PK\x03\x04"))
+            or (suffix in {".txt", ".csv"} and b"\x00" not in first_chunk)
         )
         if not (is_iso_video or is_webm or is_image or is_document):
             raise HTTPException(415, "Attachment signature does not match the declared type")
@@ -3869,10 +3871,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         if existing:
             from fastapi.responses import JSONResponse
 
-            if (
-                existing.status == DeliveryStatus.PENDING
-                and existing.dispatch_token is None
-            ):
+            if existing.status == DeliveryStatus.PENDING and existing.dispatch_token is None:
                 dispatch_delivery(session, existing)
                 audit_delivery_failure(session, user, existing)
                 audit(
@@ -3991,8 +3990,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
             raise HTTPException(409, "Delivery creation conflict") from None
         session.refresh(item)
         force_failure = (
-            settings.environment == "test"
-            and request.headers.get("X-Test-Force-Failure") == "true"
+            settings.environment == "test" and request.headers.get("X-Test-Force-Failure") == "true"
         )
         if force_failure:
             send_mock(session, item, True)
@@ -4003,11 +4001,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         cleanup_consumed_video_file(session, item)
         if item.status == DeliveryStatus.WAITING_INTERACTION:
             ready_binding = active_bot_binding(session, employee.id)
-            ready_context = bool(
-                ready_binding
-                and ready_binding.context_token_encrypted
-                and ready_binding.chat_id_encrypted
-            )
+            ready_context = bot_binding_delivery_ready(ready_binding)
             ready_legacy = active_legacy_binding(session, employee.id)
             if ready_context or (ready_legacy and ready_legacy.context_token_encrypted):
                 dispatch_waiting_deliveries(session, employee.id)
@@ -4086,9 +4080,7 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                         {DeliveryStatus.FAILED, DeliveryStatus.WAITING_INTERACTION}
                     ),
                     and_(
-                        Delivery.status.in_(
-                            {DeliveryStatus.SENDING, DeliveryStatus.RETRYING}
-                        ),
+                        Delivery.status.in_({DeliveryStatus.SENDING, DeliveryStatus.RETRYING}),
                         or_(
                             Delivery.dispatch_lease_expires_at.is_(None),
                             Delivery.dispatch_lease_expires_at <= utcnow(),
@@ -4239,12 +4231,17 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
                 and assignment.chat_id_encrypted
             ):
                 dispatch_waiting_deliveries(session, assignment.employee_id)
-            message = (
-                "通知通道已激活。后续文字通知和可选视频附件会通过这里发送。"
-                if assignment.active and first_interaction and payload.context_token
-                else "指令已处理"
+            activated_now = bool(
+                assignment.active
+                and first_interaction
+                and assignment.context_token_encrypted
+                and assignment.chat_id_encrypted
             )
-            return {"command": command, "message": message}
+            return {
+                "command": command,
+                "message": "指令已处理",
+                "reply": not activated_now,
+            }
         if text.startswith("绑定 "):
             code = text.split(" ", 1)[1].strip().upper()
             record = session.scalar(
@@ -4341,13 +4338,9 @@ def build_router(settings: Settings, factory: sessionmaker[Session]) -> APIRoute
         return {"command": text, "message": "指令已处理"}
 
     @router.get("/bot/health", tags=["bot"])
-    def bot_health(
-        session: Session = Depends(get_session), _user: User = Depends(platform_user)
-    ):
+    def bot_health(session: Session = Depends(get_session), _user: User = Depends(platform_user)):
         active_count = session.scalar(
-            select(func.count(EmployeeBotBinding.id)).where(
-                EmployeeBotBinding.active.is_(True)
-            )
+            select(func.count(EmployeeBotBinding.id)).where(EmployeeBotBinding.active.is_(True))
         )
         return {
             "mode": settings.delivery_mode,

@@ -65,11 +65,14 @@ def test_unbound_bot_account_cannot_be_claimed_by_another_company(
     with patch("app.ilink_binding.IlinkQrAdapter.create", return_value=qr_ticket("owner-a")):
         owner_a = create_employee(client, csrf, "greenhome")
     activate_independent_bot(client, csrf, owner_a, "tenant-owned-bot")
-    assert client.post(
-        f"/api/v1/employees/{owner_a['id']}/unbind",
-        headers={"X-CSRF-Token": csrf},
-        json={"confirm": True},
-    ).status_code == 200
+    assert (
+        client.post(
+            f"/api/v1/employees/{owner_a['id']}/unbind",
+            headers={"X-CSRF-Token": csrf},
+            json={"confirm": True},
+        ).status_code
+        == 200
+    )
 
     with patch("app.ilink_binding.IlinkQrAdapter.create", return_value=qr_ticket("owner-b")):
         owner_b = create_employee(client, csrf, "sanlin")
@@ -103,11 +106,14 @@ def test_inbound_confirmation_is_fenced_to_current_binding(client: TestClient) -
         database.add(old_delivery)
         database.commit()
         old_delivery_id = old_delivery.id
-    assert client.post(
-        f"/api/v1/employees/{employee['id']}/unbind",
-        headers={"X-CSRF-Token": csrf},
-        json={"confirm": True},
-    ).status_code == 200
+    assert (
+        client.post(
+            f"/api/v1/employees/{employee['id']}/unbind",
+            headers={"X-CSRF-Token": csrf},
+            json={"confirm": True},
+        ).status_code
+        == 200
+    )
     with patch("app.ilink_binding.IlinkQrAdapter.create", return_value=qr_ticket("new")):
         new_session = client.post(
             f"/api/v1/employees/{employee['id']}/binding-sessions",
@@ -117,10 +123,13 @@ def test_inbound_confirmation_is_fenced_to_current_binding(client: TestClient) -
         "app.ilink_binding.IlinkQrAdapter.poll",
         return_value=confirmed("new-confirm-bot"),
     ):
-        assert client.post(
-            f"/api/v1/binding-sessions/{new_session['id']}/poll",
-            headers={"X-CSRF-Token": csrf},
-        ).json()["status"] == "bound"
+        assert (
+            client.post(
+                f"/api/v1/binding-sessions/{new_session['id']}/poll",
+                headers={"X-CSRF-Token": csrf},
+            ).json()["status"]
+            == "bound"
+        )
     inbound = client.post(
         "/api/v1/bot/inbound",
         headers={"X-Bot-Secret": "test-bot-webhook-secret-123456789"},
@@ -168,16 +177,22 @@ def test_legacy_binding_cannot_confirm_delivery_without_immutable_binding_versio
         "chat_id": "replacement-legacy-chat",
         "context_token": "replacement-legacy-context",
     }
-    assert client.post(
-        "/api/v1/bot/inbound",
-        headers={"X-Bot-Secret": "test-bot-webhook-secret-123456789"},
-        json={**inbound_payload, "text": f"绑定 {code}"},
-    ).status_code == 200
-    assert client.post(
-        "/api/v1/bot/inbound",
-        headers={"X-Bot-Secret": "test-bot-webhook-secret-123456789"},
-        json={**inbound_payload, "text": "已收到"},
-    ).status_code == 200
+    assert (
+        client.post(
+            "/api/v1/bot/inbound",
+            headers={"X-Bot-Secret": "test-bot-webhook-secret-123456789"},
+            json={**inbound_payload, "text": f"绑定 {code}"},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/v1/bot/inbound",
+            headers={"X-Bot-Secret": "test-bot-webhook-secret-123456789"},
+            json={**inbound_payload, "text": "已收到"},
+        ).status_code
+        == 200
+    )
     assert client.get(f"/api/v1/deliveries/{old_delivery_id}").json()["status"] == "sent"
 
 
@@ -280,9 +295,12 @@ def test_cross_tenant_and_wrong_employee_session_access_fail(client: TestClient)
     assert transfer.status_code == 403
 
     with patch("app.ilink_binding.IlinkQrAdapter.poll", return_value=confirmed()):
-        assert client.post(
-            f"/api/v1/binding-sessions/{sid}/poll", headers={"X-CSRF-Token": csrf}
-        ).status_code == 200
+        assert (
+            client.post(
+                f"/api/v1/binding-sessions/{sid}/poll", headers={"X-CSRF-Token": csrf}
+            ).status_code
+            == 200
+        )
 
 
 def test_concurrent_confirmation_consumes_session_once(client: TestClient) -> None:
@@ -365,10 +383,13 @@ def test_duplicate_bot_requires_explicit_transfer_and_unbind_releases_it(
         old = create_employee(client, csrf)
         new = create_employee(client, csrf)
     with patch("app.ilink_binding.IlinkQrAdapter.poll", return_value=confirmed("shared-bot")):
-        assert client.post(
-            f"/api/v1/binding-sessions/{old['binding_session']['id']}/poll",
-            headers={"X-CSRF-Token": csrf},
-        ).json()["status"] == "bound"
+        assert (
+            client.post(
+                f"/api/v1/binding-sessions/{old['binding_session']['id']}/poll",
+                headers={"X-CSRF-Token": csrf},
+            ).json()["status"]
+            == "bound"
+        )
         collision = client.post(
             f"/api/v1/binding-sessions/{new['binding_session']['id']}/poll",
             headers={"X-CSRF-Token": csrf},
@@ -382,11 +403,14 @@ def test_duplicate_bot_requires_explicit_transfer_and_unbind_releases_it(
         "text": "帮助",
         "context_token": "transfer-context",  # noqa: S105 - simulated iLink context
     }
-    assert client.post(
-        "/api/v1/bot/inbound",
-        headers={"X-Bot-Secret": "test-bot-webhook-secret-123456789"},
-        json=activation_payload,
-    ).status_code == 200
+    assert (
+        client.post(
+            "/api/v1/bot/inbound",
+            headers={"X-Bot-Secret": "test-bot-webhook-secret-123456789"},
+            json=activation_payload,
+        ).status_code
+        == 200
+    )
 
     moved = client.post(
         "/api/v1/binding-transfers",
@@ -397,17 +421,18 @@ def test_duplicate_bot_requires_explicit_transfer_and_unbind_releases_it(
     assert client.get(f"/api/v1/employees/{old['id']}").json()["binding"] is None
     assert client.get(f"/api/v1/employees/{new['id']}").json()["binding"]["status"] == "bound"
     with client.app.state.session_factory() as database:
-        old_binding = (
-            database.query(EmployeeBotBinding).filter_by(employee_id=old["id"]).one()
-        )
+        old_binding = database.query(EmployeeBotBinding).filter_by(employee_id=old["id"]).one()
         assert old_binding.context_token_encrypted is None
         assert old_binding.chat_id_encrypted is None
 
-    assert client.post(
-        "/api/v1/bot/inbound",
-        headers={"X-Bot-Secret": "test-bot-webhook-secret-123456789"},
-        json=activation_payload,
-    ).status_code == 200
+    assert (
+        client.post(
+            "/api/v1/bot/inbound",
+            headers={"X-Bot-Secret": "test-bot-webhook-secret-123456789"},
+            json=activation_payload,
+        ).status_code
+        == 200
+    )
 
     unbound = client.post(
         f"/api/v1/employees/{new['id']}/unbind",
@@ -417,9 +442,7 @@ def test_duplicate_bot_requires_explicit_transfer_and_unbind_releases_it(
     assert unbound.status_code == 200
     assert client.get(f"/api/v1/employees/{new['id']}").json()["binding"] is None
     with client.app.state.session_factory() as database:
-        new_binding = (
-            database.query(EmployeeBotBinding).filter_by(employee_id=new["id"]).one()
-        )
+        new_binding = database.query(EmployeeBotBinding).filter_by(employee_id=new["id"]).one()
         assert new_binding.context_token_encrypted is None
         assert new_binding.chat_id_encrypted is None
 
@@ -535,9 +558,7 @@ def test_safe_get_updates_probe_reports_only_aggregate_contract(caplog):
             ],
         }
 
-    probe = SafeGetUpdatesProbe(
-        get_updates, b"correlation-key", empty_log_interval_seconds=300
-    )
+    probe = SafeGetUpdatesProbe(get_updates, b"correlation-key", empty_log_interval_seconds=300)
     probe.update_credentials([credential])
     with caplog.at_level(logging.INFO, logger="app.bot_worker"):
         response = asyncio.run(
@@ -652,7 +673,7 @@ def test_safe_get_updates_probe_is_fail_closed_and_restores_lifecycle(caplog):
     assert official._get_updates is original
 
 
-def test_independent_bot_waits_for_first_interaction_then_delivers(
+def test_independent_bot_activates_on_first_inbound_and_delivers_waiting_tasks(
     client: TestClient,
 ) -> None:
     csrf = login(client)
@@ -664,6 +685,11 @@ def test_independent_bot_waits_for_first_interaction_then_delivers(
             headers={"X-CSRF-Token": csrf},
         )
     assert bound.json()["status"] == "bound"
+    assert bound.json()["delivery_ready"] is False
+    detail = client.get(f"/api/v1/employees/{employee['id']}").json()
+    assert detail["binding"]["delivery_ready"] is False
+    assert detail["binding"]["manual_test"]["allowed"] is False
+    assert detail["binding"]["welcome_delivery"]["status"] == "waiting_interaction"
 
     asset = create_asset(client, csrf, employee["id"])
     delivery = client.post(
@@ -693,8 +719,14 @@ def test_independent_bot_waits_for_first_interaction_then_delivers(
         },
     )
     assert inbound.status_code == 200
-    assert "通知通道已激活" in inbound.json()["message"]
+    assert inbound.json()["message"] == "指令已处理"
+    assert inbound.json()["reply"] is False
     assert client.get(f"/api/v1/deliveries/{delivery.json()['id']}").json()["status"] == "simulated"
+    refreshed_session = client.post(
+        f"/api/v1/binding-sessions/{employee['binding_session']['id']}/poll",
+        headers={"X-CSRF-Token": csrf},
+    ).json()
+    assert refreshed_session["delivery_ready"] is True
 
     detail = client.get(f"/api/v1/employees/{employee['id']}").json()
     assert detail["binding"]["health_status"] == "healthy"
@@ -721,6 +753,11 @@ def test_concurrent_first_inbound_claims_waiting_delivery_once(client: TestClien
             f"/api/v1/binding-sessions/{employee['binding_session']['id']}/poll",
             headers={"X-CSRF-Token": csrf},
         )
+    with client.app.state.session_factory() as database:
+        binding = database.query(EmployeeBotBinding).filter_by(employee_id=employee["id"]).one()
+        binding.context_token_encrypted = None
+        binding.chat_id_encrypted = None
+        database.commit()
     asset = create_asset(client, csrf, employee["id"])
     delivery = client.post(
         "/api/v1/deliveries",
@@ -776,6 +813,11 @@ def test_partial_auto_retry_failure_keeps_activation_and_prior_result(
             f"/api/v1/binding-sessions/{employee['binding_session']['id']}/poll",
             headers={"X-CSRF-Token": csrf},
         )
+    with client.app.state.session_factory() as database:
+        binding = database.query(EmployeeBotBinding).filter_by(employee_id=employee["id"]).one()
+        binding.context_token_encrypted = None
+        binding.chat_id_encrypted = None
+        database.commit()
 
     settings = client.app.state.settings
     object.__setattr__(settings, "delivery_mode", "weixin")
@@ -824,9 +866,10 @@ def test_partial_auto_retry_failure_keeps_activation_and_prior_result(
         for delivery_id in delivery_ids
     }
     assert statuses == {"sent", "failed"}
-    assert client.get(f"/api/v1/employees/{employee['id']}").json()["binding"][
-        "delivery_ready"
-    ] is True
+    assert (
+        client.get(f"/api/v1/employees/{employee['id']}").json()["binding"]["delivery_ready"]
+        is True
+    )
 
 
 def test_first_inbound_unsubscribe_does_not_activate_or_retain_context(
@@ -856,9 +899,7 @@ def test_first_inbound_unsubscribe_does_not_activate_or_retain_context(
     assert response.json()["message"] == "指令已处理"
     assert client.get(f"/api/v1/employees/{employee['id']}").json()["binding"] is None
     with client.app.state.session_factory() as database:
-        binding = (
-            database.query(EmployeeBotBinding).filter_by(employee_id=employee["id"]).one()
-        )
+        binding = database.query(EmployeeBotBinding).filter_by(employee_id=employee["id"]).one()
         assert binding.active is False
         assert binding.context_token_encrypted is None
         assert binding.chat_id_encrypted is None
@@ -902,9 +943,7 @@ def test_concurrent_unbind_and_inbound_cannot_restore_revoked_context(
     assert responses[0].status_code == 200
     assert responses[1].status_code in {200, 403, 409}
     with client.app.state.session_factory() as database:
-        binding = (
-            database.query(EmployeeBotBinding).filter_by(employee_id=employee["id"]).one()
-        )
+        binding = database.query(EmployeeBotBinding).filter_by(employee_id=employee["id"]).one()
         assert binding.active is False
         assert binding.context_token_encrypted is None
         assert binding.chat_id_encrypted is None

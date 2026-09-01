@@ -5,7 +5,15 @@ import re
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.models import AuditLog, Employee, NotificationTarget, UserObjectContact
+from app.models import (
+    AuditLog,
+    BotHealthStatus,
+    Employee,
+    EmployeeBotBinding,
+    NotificationTarget,
+    UserObjectContact,
+    WeixinBotAccount,
+)
 from tests.test_binding import login
 from tests.test_binding_notifications import bind_and_activate
 from tests.test_platform_api import auth, create_target
@@ -33,6 +41,7 @@ def test_user_object_can_start_empty_and_contact_phone_is_encrypted_and_redacted
     assert created["all_available"] is False
     assert created["bound_count"] == 0
     assert created["pending_count"] == 0
+    assert created["activating_count"] == 0
     assert created["unhealthy_count"] == 0
     assert created["description"] == ""
 
@@ -55,9 +64,7 @@ def test_user_object_can_start_empty_and_contact_phone_is_encrypted_and_redacted
         assert employee is not None
         assert employee.phone_encrypted and "13800138000" not in employee.phone_encrypted
         assert employee.phone_fingerprint and employee.phone_fingerprint != "+8613800138000"
-        assert session.scalar(
-            select(AuditLog).where(AuditLog.action == "user_object.contact.add")
-        )
+        assert session.scalar(select(AuditLog).where(AuditLog.action == "user_object.contact.add"))
 
     business = client.get(
         f"/api/v1/companies/greenhome/user-objects/{code}",
@@ -187,9 +194,7 @@ def test_contact_memberships_are_idempotent_and_soft_removed(client: TestClient)
     csrf = login(client)
     employee = bind_and_activate(client, csrf, account="stable-contact")
     obj = create_user_object(client, csrf, "稳定关系")
-    path = (
-        f"/api/v1/companies/greenhome/user-objects/{obj['user_object_code']}/contacts"
-    )
+    path = f"/api/v1/companies/greenhome/user-objects/{obj['user_object_code']}/contacts"
     first = client.post(path, headers=auth(csrf), json={"employee_id": employee["id"]})
     second = client.post(path, headers=auth(csrf), json={"employee_id": employee["id"]})
     assert first.status_code == 201, first.text
@@ -208,9 +213,12 @@ def test_contact_memberships_are_idempotent_and_soft_removed(client: TestClient)
         "DELETE", f"{path}/{employee['id']}", headers=auth(csrf), json={"confirm": True}
     )
     assert removed.status_code == 200, removed.text
-    assert client.get(
-        f"/api/v1/companies/greenhome/user-objects/{obj['user_object_code']}"
-    ).json()["contacts"] == []
+    assert (
+        client.get(f"/api/v1/companies/greenhome/user-objects/{obj['user_object_code']}").json()[
+            "contacts"
+        ]
+        == []
+    )
     factory = client.app.state.session_factory
     with factory() as session:
         history = session.scalars(
@@ -224,18 +232,60 @@ def test_contact_memberships_are_idempotent_and_soft_removed(client: TestClient)
         assert history[0].removed_at is not None
 
 
+def test_user_object_detail_explains_why_a_bound_bot_is_not_ready_for_testing(
+    client: TestClient,
+) -> None:
+    csrf = login(client)
+    employee = bind_and_activate(client, csrf, account="activation-guidance")
+    obj = create_user_object(client, csrf, "待首次互动")
+    contacts = f"/api/v1/companies/greenhome/user-objects/{obj['user_object_code']}/contacts"
+    assert (
+        client.post(
+            contacts,
+            headers=auth(csrf),
+            json={"employee_id": employee["id"]},
+        ).status_code
+        == 201
+    )
+
+    factory = client.app.state.session_factory
+    with factory.begin() as session:
+        binding = session.scalar(
+            select(EmployeeBotBinding).where(
+                EmployeeBotBinding.employee_id == employee["id"],
+                EmployeeBotBinding.active.is_(True),
+            )
+        )
+        assert binding is not None
+        account = session.get(WeixinBotAccount, binding.bot_account_id)
+        assert account is not None
+        account.health_status = BotHealthStatus.UNKNOWN
+        binding.context_token_encrypted = None
+        binding.chat_id_encrypted = None
+
+    detail = client.get(f"/api/v1/companies/greenhome/user-objects/{obj['user_object_code']}")
+    assert detail.status_code == 200, detail.text
+    exposed = detail.json()["contacts"][0]["binding"]
+    assert detail.json()["activating_count"] == 1
+    assert detail.json()["unhealthy_count"] == 0
+    assert exposed["status"] == "bound"
+    assert exposed["health_status"] == "unknown"
+    assert exposed["delivery_ready"] is False
+    assert exposed["manual_test"] == {
+        "allowed": False,
+        "reason": "请先在微信 Bot 会话中发送任意消息完成会话初始化",
+        "retry_after_seconds": None,
+    }
+
+
 def test_user_object_deletion_requires_server_confirmation(client: TestClient) -> None:
     csrf = login(client)
     obj = create_user_object(client, csrf, "待删除对象")
     path = f"/api/v1/companies/greenhome/user-objects/{obj['user_object_code']}"
-    rejected = client.request(
-        "DELETE", path, headers=auth(csrf), json={"confirm": False}
-    )
+    rejected = client.request("DELETE", path, headers=auth(csrf), json={"confirm": False})
     assert rejected.status_code == 422
     assert client.get(path).status_code == 200
-    accepted = client.request(
-        "DELETE", path, headers=auth(csrf), json={"confirm": True}
-    )
+    accepted = client.request("DELETE", path, headers=auth(csrf), json={"confirm": True})
     assert accepted.status_code == 200
     assert client.get(path).status_code == 404
 
@@ -247,9 +297,7 @@ def test_user_object_deactivation_requires_confirmation_and_old_route_cannot_byp
     obj = create_user_object(client, csrf, "待停用对象")
     path = f"/api/v1/companies/greenhome/user-objects/{obj['user_object_code']}"
 
-    rejected = client.patch(
-        path, headers=auth(csrf), json={"enabled": False, "confirm": False}
-    )
+    rejected = client.patch(path, headers=auth(csrf), json={"enabled": False, "confirm": False})
     assert rejected.status_code == 422
     assert client.get(path).json()["enabled"] is True
 
@@ -265,9 +313,7 @@ def test_user_object_deactivation_requires_confirmation_and_old_route_cannot_byp
         assert persisted.enabled is True
         assert persisted.mode.value == "multi"
 
-    accepted = client.patch(
-        path, headers=auth(csrf), json={"enabled": False, "confirm": True}
-    )
+    accepted = client.patch(path, headers=auth(csrf), json={"enabled": False, "confirm": True})
     assert accepted.status_code == 200, accepted.text
     assert accepted.json()["enabled"] is False
 
@@ -294,17 +340,21 @@ def test_database_api_client_user_object_queries_enforce_permission_tenant_and_a
 
     listed = client.get("/api/v1/companies/greenhome/user-objects", headers=bearer)
     assert listed.status_code == 200, listed.text
-    assert [item["user_object_code"] for item in listed.json()] == [
-        allowed["user_object_code"]
-    ]
-    assert client.get(
-        f"/api/v1/companies/greenhome/user-objects/{allowed['user_object_code']}",
-        headers=bearer,
-    ).status_code == 200
-    assert client.get(
-        f"/api/v1/companies/greenhome/user-objects/{blocked['user_object_code']}",
-        headers=bearer,
-    ).status_code == 403
+    assert [item["user_object_code"] for item in listed.json()] == [allowed["user_object_code"]]
+    assert (
+        client.get(
+            f"/api/v1/companies/greenhome/user-objects/{allowed['user_object_code']}",
+            headers=bearer,
+        ).status_code
+        == 200
+    )
+    assert (
+        client.get(
+            f"/api/v1/companies/greenhome/user-objects/{blocked['user_object_code']}",
+            headers=bearer,
+        ).status_code
+        == 403
+    )
     assert client.get("/api/v1/companies/sanlin/user-objects", headers=bearer).status_code == 403
 
     csrf = login(client)
@@ -320,9 +370,10 @@ def test_database_api_client_user_object_queries_enforce_permission_tenant_and_a
     )
     denied_bearer = {"Authorization": f"Bearer {denied.json()['token']}"}
     client.cookies.clear()
-    assert client.get(
-        "/api/v1/companies/greenhome/user-objects", headers=denied_bearer
-    ).status_code == 403
+    assert (
+        client.get("/api/v1/companies/greenhome/user-objects", headers=denied_bearer).status_code
+        == 403
+    )
 
 
 def test_database_api_client_can_send_to_a_user_object(client: TestClient) -> None:
@@ -363,9 +414,9 @@ def test_database_api_client_can_send_to_a_user_object(client: TestClient) -> No
     assert body["total"] == 1
     assert body["simulated"] == 1
     assert body["status"] == "simulated"
-    assert client.get(
-        f"/api/v1/notification-batches/{body['id']}", headers=bearer
-    ).status_code == 200
+    assert (
+        client.get(f"/api/v1/notification-batches/{body['id']}", headers=bearer).status_code == 200
+    )
 
 
 def test_user_object_binding_alias_reuses_confirmation_and_qr_lifecycle(
@@ -378,28 +429,30 @@ def test_user_object_binding_alias_reuses_confirmation_and_qr_lifecycle(
         f"/api/v1/companies/greenhome/user-objects/{obj['user_object_code']}"
         f"/contacts/{employee['id']}"
     )
-    assert client.post(
-        contacts.rsplit("/", 1)[0],
-        headers=auth(csrf),
-        json={"employee_id": employee["id"]},
-    ).status_code == 201
+    assert (
+        client.post(
+            contacts.rsplit("/", 1)[0],
+            headers=auth(csrf),
+            json={"employee_id": employee["id"]},
+        ).status_code
+        == 201
+    )
     preview_payload = {
         "company_slug": "greenhome",
         "target_code": obj["user_object_code"],
     }
-    assert client.post(
-        "/api/v1/notifications/preview", headers=auth(csrf), json=preview_payload
-    ).json()["bot_count"] == 1
-
-    rejected = client.post(
-        f"{contacts}/unbind", headers=auth(csrf), json={"confirm": False}
+    assert (
+        client.post(
+            "/api/v1/notifications/preview", headers=auth(csrf), json=preview_payload
+        ).json()["bot_count"]
+        == 1
     )
+
+    rejected = client.post(f"{contacts}/unbind", headers=auth(csrf), json={"confirm": False})
     assert rejected.status_code == 422
     assert client.get(f"/api/v1/employees/{employee['id']}").json()["binding"] is not None
 
-    accepted = client.post(
-        f"{contacts}/unbind", headers=auth(csrf), json={"confirm": True}
-    )
+    accepted = client.post(f"{contacts}/unbind", headers=auth(csrf), json={"confirm": True})
     assert accepted.status_code == 200, accepted.text
     assert client.get(f"/api/v1/employees/{employee['id']}").json()["binding"] is None
 
@@ -425,9 +478,12 @@ def test_contact_deactivation_requires_confirmation_and_preserves_membership_his
     )
     rejected = client.post(path, headers=auth(csrf), json={"confirm": False})
     assert rejected.status_code == 422
-    assert client.get(
-        f"/api/v1/companies/greenhome/user-objects/{code}"
-    ).json()["contacts"][0]["status"] == "active"
+    assert (
+        client.get(f"/api/v1/companies/greenhome/user-objects/{code}").json()["contacts"][0][
+            "status"
+        ]
+        == "active"
+    )
 
     accepted = client.post(path, headers=auth(csrf), json={"confirm": True})
     assert accepted.status_code == 200, accepted.text
@@ -486,9 +542,7 @@ def test_legacy_employee_delete_requires_confirmation_for_user_object_contact(
     assert rejected.status_code == 422
     assert client.get(path).status_code == 200
 
-    accepted = client.request(
-        "DELETE", path, headers=auth(csrf), json={"confirm": True}
-    )
+    accepted = client.request("DELETE", path, headers=auth(csrf), json={"confirm": True})
     assert accepted.status_code == 200, accepted.text
     assert client.get(path).status_code == 404
 
@@ -504,9 +558,7 @@ def test_alias_preserves_legacy_single_and_dynamic_all_semantics(client: TestCli
         code="legacy-single-alias",
         binding_ids=[detail["binding"]["binding_id"]],
     )
-    legacy = client.get(
-        "/api/v1/companies/greenhome/user-objects/legacy-single-alias"
-    )
+    legacy = client.get("/api/v1/companies/greenhome/user-objects/legacy-single-alias")
     assert legacy.status_code == 200, legacy.text
     assert legacy.json()["is_user_object"] is False
     assert [item["employee_id"] for item in legacy.json()["contacts"]] == [employee["id"]]
@@ -519,12 +571,8 @@ def test_alias_preserves_legacy_single_and_dynamic_all_semantics(client: TestCli
         code="everyone-alias",
         mode="dynamic_all",
     )
-    dynamic_alias = client.get(
-        "/api/v1/companies/greenhome/user-objects/everyone-alias"
-    )
+    dynamic_alias = client.get("/api/v1/companies/greenhome/user-objects/everyone-alias")
     assert dynamic_alias.status_code == 200, dynamic_alias.text
     assert dynamic_alias.json()["target_id"] == dynamic["target_id"]
     assert dynamic_alias.json()["all_available"] is True
-    assert [item["employee_id"] for item in dynamic_alias.json()["contacts"]] == [
-        employee["id"]
-    ]
+    assert [item["employee_id"] for item in dynamic_alias.json()["contacts"]] == [employee["id"]]

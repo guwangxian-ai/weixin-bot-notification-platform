@@ -30,7 +30,7 @@
 - 微信标识加密存储，另存 HMAC 指纹用于唯一约束；API 仅返回掩码。
 - 绑定码只存哈希，短时、单次、事务内消费；解绑同时撤销数据库授权。
 - `idempotency_key` 在公司范围唯一；发送成功仅为 `sent`，员工回复“已收到”才为 `confirmed`。
-- context token 缺失/过期进入 `waiting_interaction`，后续允许消息刷新上下文并补发。
+- 扫码 owner user ID 作为加密预备目标；首次入站提供 iLink 必需的 context token 和实际 chat ID。在此之前通知进入 `waiting_interaction`，之后自动补发并切换为可用。
 - 下载使用随机短期签名票据，只解析数据库登记的资产路径，禁止任意路径访问。
 
 ## 暂不阻塞开发的外部项

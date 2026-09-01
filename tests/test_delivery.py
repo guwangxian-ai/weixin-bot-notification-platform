@@ -177,9 +177,7 @@ def test_delivery_rejects_existing_video_above_direct_send_limit(
     employee = create_employee(client, csrf)
     bind_employee(client, csrf, employee["id"])
     asset = create_asset(client, csrf, employee["id"])
-    object.__setattr__(
-        client.app.state.settings, "native_video_max_bytes", len(FAKE_MP4) - 1
-    )
+    object.__setattr__(client.app.state.settings, "native_video_max_bytes", len(FAKE_MP4) - 1)
 
     response = client.post(
         "/api/v1/deliveries",
@@ -251,10 +249,7 @@ def test_delivery_is_idempotent_and_confirmation_is_explicit(client: TestClient)
         },
     )
     assert confirmed.status_code == 200
-    assert (
-        client.get(f"/api/v1/deliveries/{first.json()['id']}").json()["status"]
-        == "simulated"
-    )
+    assert client.get(f"/api/v1/deliveries/{first.json()['id']}").json()["status"] == "simulated"
 
 
 def test_concurrent_delivery_creation_returns_one_idempotent_record(
@@ -299,9 +294,7 @@ def test_idempotent_replay_recovers_unleased_pending_delivery(
         "title": "恢复待发送通知",
         "idempotency_key": "pending-recovery-001",
     }
-    created = client.post(
-        "/api/v1/deliveries", headers={"X-CSRF-Token": csrf}, json=payload
-    ).json()
+    created = client.post("/api/v1/deliveries", headers={"X-CSRF-Token": csrf}, json=payload).json()
     with sqlite3.connect(tmp_path / "test.db") as connection:
         connection.execute(
             """UPDATE deliveries
@@ -312,9 +305,7 @@ def test_idempotent_replay_recovers_unleased_pending_delivery(
         )
         connection.commit()
 
-    recovered = client.post(
-        "/api/v1/deliveries", headers={"X-CSRF-Token": csrf}, json=payload
-    )
+    recovered = client.post("/api/v1/deliveries", headers={"X-CSRF-Token": csrf}, json=payload)
 
     assert recovered.status_code == 200
     assert recovered.json()["id"] == created["id"]
@@ -355,7 +346,9 @@ def test_video_asset_can_only_be_claimed_by_one_delivery(client: TestClient) -> 
     assert second.json() == {"detail": "Video is already assigned to a delivery"}
 
 
-def test_missing_context_waits_and_next_interaction_redelivers(client: TestClient) -> None:
+def test_legacy_binding_missing_context_waits_and_next_interaction_redelivers(
+    client: TestClient,
+) -> None:
     csrf = login(client)
     employee = create_employee(client, csrf)
     bind_employee(client, csrf, employee["id"])
@@ -477,9 +470,7 @@ def test_concurrent_manual_retry_claims_failed_delivery_once(client: TestClient)
     assert stored["retry_count"] == 1
 
 
-def test_stale_inflight_delivery_can_be_recovered(
-    client: TestClient, tmp_path: Path
-) -> None:
+def test_stale_inflight_delivery_can_be_recovered(client: TestClient, tmp_path: Path) -> None:
     csrf = login(client)
     employee = create_employee(client, csrf)
     bind_employee(client, csrf, employee["id"])
@@ -724,6 +715,9 @@ def test_successful_video_delivery_deletes_file_and_keeps_logs(
             f"/api/v1/deliveries/{rate_limited.json()['id']}/retry",
             headers={"X-CSRF-Token": csrf},
         )
+        health_after_rate_limit = large_client.get(f"/api/v1/employees/{employee['id']}").json()[
+            "binding"
+        ]["health_status"]
     assert response.status_code == 201
     assert response.json()["status"] == "sent"
     assert captured["status_before_media"] == ("SENDING", None)
@@ -740,5 +734,6 @@ def test_successful_video_delivery_deletes_file_and_keeps_logs(
     assert rate_limited.json()["status"] == "failed"
     assert rate_limited.json()["failure_code"] == "weixin_rate_limited"
     assert rate_limited.json()["next_retry_at"] is not None
+    assert health_after_rate_limit == "healthy"
     assert premature_retry.status_code == 409
     assert premature_retry.json() == {"detail": "Delivery retry is not due yet"}

@@ -11,8 +11,8 @@
 - `dry-run`：记录计划但不触达微信。
 - `weixin`：只有专属凭据齐全时配置校验才通过。
 
-## context token
-扫码完成不等于主动通知已经可用。首次用户入站携带的 context token 加密入库后，API 才返回 `delivery_ready=true`。缺失时任务转 `waiting_interaction`；首次互动后通道激活并自动补发。发送失败保留任务、失败码、人类提示与重试次数，`queued`、`dry-run` 和 `waiting_interaction` 都不得对外称为发送成功。
+## 首条消息与 context token
+扫码确认返回的 owner user ID 会作为加密的预备直达目标，但 iLink `bot_type=3` 在目标用户尚未给 Bot 发送首条消息时不允许 Bot 主动发出第一条消息。首次用户入站携带的 context token 和实际 chat ID 加密入库后，API 才返回 `delivery_ready=true`，并自动补发“绑定成功”和其他 `waiting_interaction` 任务。平台不会在 context 缺失时调用真实发送，避免将 iLink 的 `ret=-2 / prepare failed` 误报为普通限流。发送失败保留任务、失败码、人类提示与重试次数，`queued`、`dry-run` 和 `waiting_interaction` 都不得对外称为发送成功。
 
 iLink 主动发送限流会安全映射为 `weixin_rate_limited`，响应提示 30 秒后重试并设置 `next_retry_at`；重试接口在该时间前返回 409。不得把限流伪装成已发送，也不得通过更换幂等键制造重复通知。
 
@@ -29,8 +29,8 @@ iLink 主动发送限流会安全映射为 `weixin_rate_limited`，响应提示 
 - 真实环境设置 `APP_DELIVERY_MODE=weixin`，并启用 `weixin-bot-notification-platform-bot.service`。
 - 安装服务前先安装 `deploy/weixin-bot-notification-platform.conf` 到 `/etc/tmpfiles.d/`，执行 `systemd-tmpfiles --create /etc/tmpfiles.d/weixin-bot-notification-platform.conf`，再安装/启动 Bot unit。该规则会以服务账号创建权限为 `0700` 的 token 锁目录，避免干净主机因 `ReadWritePaths` 目标不存在而启动失败。
 - 每个在职员工仅启动其独立 Bot 凭据的官方 `WeixinAdapter` 长轮询；正式 worker 必须是该 token 唯一的本机消费者。
-- 扫码后员工必须给 Bot 发送一次消息，页面在此之前显示 `waiting_interaction`。
-- 扫码创建的是独立 `@im.bot` 身份，不是扫码人的普通微信账号。首次互动必须在收到连接成功通知的那个独立 Bot 会话中直接回复；发给扫码账号自身、文件传输助手、普通群聊或在群里 @ 扫码账号都不会进入该 Bot 的 `getUpdates`。
+- 扫码确认后，页面会保留二维码窗口并提示在新 Bot 会话发送任意消息。收到首条入站后，平台自动发送绑定成功通知并将 Bot 标记为健康可用。
+- 扫码创建的是独立 `@im.bot` 身份，不是扫码人的普通微信账号。用户后续可在收到绑定成功通知的独立 Bot 会话中回复指令；发给扫码账号自身、文件传输助手、普通群聊或在群里 @ 扫码账号都不会进入该 Bot 的 `getUpdates`。
 - worker 每五分钟记录一次脱敏 `getUpdates` 汇总；有消息时立即记录消息数、owner/target 匹配数、context 数和游标是否变化，不记录响应内容或任何外部标识。
 - 验收时同时检查 API 的 `delivery_ready`、数据库密文存在、worker 入站日志、投递状态及 iLink 返回；只接受官方成功返回与数据库 `sent`，不接受队列或模拟结果。
 - iLink sync cursor 只保证向前消费，不保证历史消息重放。若错误策略已推进游标，修复后清空游标只能重新建立当前位置，不能伪造或恢复已丢失的 context token。

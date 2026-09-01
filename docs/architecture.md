@@ -14,7 +14,7 @@
 所有业务实体带 `company_id`。`super_admin` 可跨公司；`company_admin` 与 `viewer` 的公司范围由后端查询与对象级检查共同执行。幂等键在公司范围唯一。
 
 ## 通知投递状态机
-通知由独立标题、正文和可选视频附件组成。真实通道为 `pending → sending → sent → confirmed`；失败进入 `failed`，重试时进入 `retrying`；缺少可用上下文进入 `waiting_interaction`；管理员可对未确认任务设为 `cancelled`。隔离 mock/dry-run 使用独立的 `simulated` 终态，不计作 `sent`，也不能升级为 `confirmed`。API 接受或模拟成功均不等于员工确认。
+通知由独立标题、正文和可选视频附件组成。真实通道为 `pending → sending → sent → confirmed`；失败进入 `failed`，重试时进入 `retrying`；新 Bot 尚未通过首条入站获得 context token 时进入 `waiting_interaction`；管理员可对未确认任务设为 `cancelled`。context token 是 iLink 首次出站的必需会话凭据，后续入站会持续刷新。隔离 mock/dry-run 使用独立的 `simulated` 终态，不计作 `sent`，也不能升级为 `confirmed`。API 接受或模拟成功均不等于员工确认。
 
 ## AI 边界
 绑定状态机为 `pending → scanned → confirming → bound`，旁路终态为 `expired / cancelled / failed / revoked`。独立 Bot 与员工通过分配表关联，解除后账号可用同公司事务转交。绑定、通知、领取、确认、退订和帮助由确定性代码处理；普通 Bot 输入不会进入模型。

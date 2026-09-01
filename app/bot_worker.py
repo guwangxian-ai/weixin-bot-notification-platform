@@ -102,9 +102,7 @@ class SafeGetUpdatesProbe:
         self._last_empty_log: dict[str, float] = {}
 
     def _token_ref(self, token: str) -> str:
-        return hmac.new(
-            self._correlation_key, token.encode(), hashlib.sha256
-        ).hexdigest()
+        return hmac.new(self._correlation_key, token.encode(), hashlib.sha256).hexdigest()
 
     def update_credentials(self, credentials: Any) -> None:
         self._identities = {
@@ -148,13 +146,11 @@ class SafeGetUpdatesProbe:
 
         raw_messages = response.get("msgs") or []
         messages = [item for item in raw_messages if isinstance(item, dict)]
-        ret_ok = response.get("ret", 0) in {0, None} and response.get(
-            "errcode", 0
-        ) in {0, None}
+        ret_ok = response.get("ret", 0) in {0, None} and response.get("errcode", 0) in {0, None}
         now = time.monotonic()
         last_empty = self._last_empty_log.get(token_ref, 0.0)
-        should_log = bool(messages) or not ret_ok or (
-            now - last_empty >= self._empty_log_interval_seconds
+        should_log = (
+            bool(messages) or not ret_ok or (now - last_empty >= self._empty_log_interval_seconds)
         )
         if should_log:
             if not messages:
@@ -170,9 +166,7 @@ class SafeGetUpdatesProbe:
                     for item in messages
                 )
                 target_match_count = sum(
-                    hmac.compare_digest(
-                        str(item.get("to_user_id") or ""), identity.account_id
-                    )
+                    hmac.compare_digest(str(item.get("to_user_id") or ""), identity.account_id)
                     for item in messages
                 )
             logger.info(
@@ -282,11 +276,7 @@ async def run(settings: Settings, factory: sessionmaker[Session]) -> None:
                         if not task.done():
                             task.cancel()
                         await asyncio.gather(task, return_exceptions=True)
-                        if (
-                            task.done()
-                            and not task.cancelled()
-                            and task.exception() is not None
-                        ):
+                        if task.done() and not task.cancelled() and task.exception() is not None:
                             logger.error(
                                 "Employee Weixin Bot task stopped error_type=%s",
                                 type(task.exception()).__name__,
@@ -313,8 +303,7 @@ async def run_account(credential: BotCredential) -> None:
                 "Employee Bot iLink update employee_ref=%s owner_match=%s "
                 "context_present=%s item_count=%s",
                 credential.employee_ref,
-                bool(sender_id)
-                and hmac.compare_digest(sender_id, credential.owner_user_id),
+                bool(sender_id) and hmac.compare_digest(sender_id, credential.owner_user_id),
                 bool(message.get("context_token")),
                 len(message.get("item_list") or []),
             )
@@ -354,7 +343,10 @@ async def run_account(credential: BotCredential) -> None:
         )
         if response.status_code >= 400:
             return "操作未完成，请联系管理员检查绑定状态。"
-        return str(response.json().get("message") or "指令已处理")
+        result = response.json()
+        if result.get("reply") is False:
+            return None
+        return str(result.get("message") or "指令已处理")
 
     adapter.set_message_handler(deterministic_handler)
     logger.info(

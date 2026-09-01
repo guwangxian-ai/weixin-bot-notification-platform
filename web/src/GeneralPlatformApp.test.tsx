@@ -20,6 +20,7 @@ type MockOptions = {
   tokenRotateGate?: Promise<void>
   userObjects?: Array<Record<string, unknown>>
   userObjectDetail?: Record<string, unknown>
+  userObjectDetailAfterBindingPoll?: Record<string, unknown>
   notificationPreview?: Record<string, unknown>
 }
 
@@ -80,6 +81,11 @@ function installApiMock(options: MockOptions = {}) {
       }
       return options.companyCreateGate ? options.companyCreateGate.then(respond) : respond()
     }
+    if (/^companies\/[^/]+$/.test(path) && method === 'PATCH') {
+      const companyId = path.split('/')[1]
+      companies = companies.map(company => company.company_id === companyId ? { ...company, ...body } : company)
+      return json(companies.find(company => company.company_id === companyId))
+    }
     if (path === 'auth/logout' && method === 'POST') return json({ ok: true })
     if (path === 'auth/login' && method === 'POST') return json({ csrf_token: 'csrf-2', role: 'super_admin' })
     if (path.startsWith('notification-targets?')) {
@@ -97,6 +103,10 @@ function installApiMock(options: MockOptions = {}) {
       return json(options.employees?.length ? [{ user_object_code: 'team-a', account_name: '员工对象', enabled: true, bound_count: 0, pending_count: 1, unhealthy_count: 0 }] : [])
     }
     if (path === 'companies/greenhome/user-objects/team-a' && method === 'GET') {
+      if (bindingPollSeen && options.failRefreshAfterBindingPoll) {
+        return json({ detail: 'isolated refresh failure' }, 503)
+      }
+      if (bindingPollSeen && options.userObjectDetailAfterBindingPoll) return json(options.userObjectDetailAfterBindingPoll)
       if (options.userObjectDetail) return json(options.userObjectDetail)
       const employee = options.employees?.[0]
       const bot = options.bots?.[0]
@@ -113,8 +123,18 @@ function installApiMock(options: MockOptions = {}) {
       return json({ user_object_code: body.routing_key || 'created-object', account_name: body.account_name, description: body.description, enabled: true }, 201)
     }
     if (path === 'companies/greenhome/user-objects/team-a' && method === 'PATCH') return json({ ...options.userObjects?.[0], ...body })
+    if (path === 'companies/greenhome/user-objects/team-a' && method === 'DELETE') return json({ ok: true })
     if (path === 'companies/greenhome/user-objects/team-a/contacts' && method === 'POST') {
       return json({ employee_id: 'employee-new', ...body }, 201)
+    }
+    if (path === 'companies/greenhome/user-objects/team-a/contacts/employee-1/unbind' && method === 'POST') {
+      return json({ ok: true })
+    }
+    if (path === 'companies/greenhome/user-objects/team-a/contacts/employee-1' && method === 'DELETE') {
+      return json({ ok: true })
+    }
+    if (path === 'employees/employee-1/test-notification' && method === 'POST') {
+      return json({ status: 'simulated' })
     }
     if (path === 'companies/greenhome/user-objects/team-a/bind-all' && method === 'POST') return json({ ok: true })
     if (path.startsWith('weixin-bots?')) return json(options.bots || [])
@@ -133,6 +153,10 @@ function installApiMock(options: MockOptions = {}) {
       return options.tokenCreateGate ? options.tokenCreateGate.then(respond) : respond()
     }
     if (path === 'api-clients/client-1/integration-guide' && method === 'GET') return json(integration)
+    if (path === 'api-clients/client-1' && method === 'PATCH') {
+      apiClients = apiClients.map(client => client.id === 'client-1' ? { ...client, ...body } : client)
+      return json(apiClients.find(client => client.id === 'client-1'))
+    }
     if (path === 'api-clients/client-1' && method === 'DELETE') {
       apiClients = apiClients.filter(client => client.id !== 'client-1')
       return json({ ok: true, deleted_id: 'client-1', detached_notification_batches: 0 })
@@ -233,6 +257,29 @@ describe('GeneralPlatformApp temporary workflow safety', () => {
     expect(within(form).getByLabelText('公司标识')).toHaveValue('acme')
     expect(within(form).getByLabelText('公司名称')).toHaveValue('示例公司')
     expect(within(form).getByRole('button', { name: '创建公司' })).toBeEnabled()
+  })
+
+  it('uses an in-page confirmation before disabling a company', async () => {
+    const { requests } = installApiMock()
+    render(<GeneralPlatformApp />)
+    await openSection('公司管理')
+    const companyCard = (await screen.findByText('greenhome')).closest('article')
+    expect(companyCard).not.toBeNull()
+    requests.splice(0)
+
+    await userEvent.click(within(companyCard!).getByRole('button', { name: '停用' }))
+    let dialog = await screen.findByRole('alertdialog', { name: '确认停用公司' })
+    expect(requests.some(request => request.method === 'PATCH')).toBe(false)
+    await userEvent.click(within(dialog).getByRole('button', { name: '取消' }))
+    expect(requests.some(request => request.method === 'PATCH')).toBe(false)
+
+    await userEvent.click(within(companyCard!).getByRole('button', { name: '停用' }))
+    dialog = await screen.findByRole('alertdialog', { name: '确认停用公司' })
+    await userEvent.click(within(dialog).getByRole('button', { name: '确认停用' }))
+    await waitFor(() => expect(requests).toContainEqual({
+      path: 'companies/greenhome', method: 'PATCH', body: { enabled: false },
+    }))
+    expect(await screen.findByText('公司已停用。')).toBeVisible()
   })
 
   it('locks tenant switching, navigation, and logout while a write is pending', async () => {
@@ -357,6 +404,8 @@ describe('GeneralPlatformApp temporary workflow safety', () => {
     render(<GeneralPlatformApp />)
     await openSection('应用接入')
     await userEvent.click(await screen.findByRole('button', { name: '轮换 Token' }))
+    const dialog = await screen.findByRole('alertdialog', { name: '确认轮换应用 Token' })
+    await userEvent.click(within(dialog).getByRole('button', { name: '确认轮换' }))
 
     expect(await screen.findByText('rotated-one-time-test-token')).toBeVisible()
     expect(screen.getByRole('button', { name: '总览' })).toBeDisabled()
@@ -376,6 +425,8 @@ describe('GeneralPlatformApp temporary workflow safety', () => {
     expect(await screen.findByText('待删除应用')).toBeVisible()
 
     await userEvent.click(screen.getByRole('button', { name: '删除' }))
+    const dialog = await screen.findByRole('alertdialog', { name: '确认删除应用接入' })
+    await userEvent.click(within(dialog).getByRole('button', { name: '确认删除' }))
 
     await waitFor(() => expect(screen.queryByText('待删除应用')).not.toBeInTheDocument())
     expect(requests).toContainEqual({
@@ -468,6 +519,8 @@ describe('GeneralPlatformApp temporary workflow safety', () => {
     render(<GeneralPlatformApp />)
     await openSection('应用接入')
     await userEvent.click(await screen.findByRole('button', { name: '轮换 Token' }))
+    const dialog = await screen.findByRole('alertdialog', { name: '确认轮换应用 Token' })
+    await userEvent.click(within(dialog).getByRole('button', { name: '确认轮换' }))
     await act(async () => {
       window.dispatchEvent(new Event('evnc:unauthorized'))
     })
@@ -538,7 +591,7 @@ describe('GeneralPlatformApp temporary workflow safety', () => {
         health_status: 'unknown', bound_at: '2026-01-01T00:00:00Z',
       }],
       employees: [{ id: 'employee-1', name: '员工甲', status: 'active' }],
-      bindingPoll: { id: 'session-1', employee_id: 'employee-1', status: 'bound' },
+      bindingPoll: { id: 'session-1', employee_id: 'employee-1', status: 'bound', delivery_ready: false },
       failRefreshAfterBindingPoll: true,
     })
     render(<GeneralPlatformApp />)
@@ -547,8 +600,8 @@ describe('GeneralPlatformApp temporary workflow safety', () => {
     await userEvent.click(await screen.findByRole('button', { name: '生成二维码' }))
     expect(await screen.findByRole('dialog', { name: '微信 Bot 二维码绑定' })).toBeInTheDocument()
 
-    expect(await screen.findByRole('alert', {}, { timeout: 3500 })).toHaveTextContent('绑定已成功，但列表刷新失败')
-    expect(screen.getByText('绑定成功')).toBeVisible()
+    expect(await screen.findByRole('alert', {}, { timeout: 3500 })).toHaveTextContent('绑定状态刷新失败')
+    expect(screen.getByText('待激活')).toBeVisible()
   })
 
   it('clears all tenant data on explicit logout', async () => {
@@ -631,8 +684,8 @@ describe('merged user object management', () => {
 
     const preview = await screen.findByRole('status', { name: '客服组接收范围预览' })
     expect(within(preview).getByText('1')).toBeVisible()
-    expect(within(preview).getByText('/ 2 个 Bot 健康可发送')).toBeVisible()
-    expect(within(preview).getByText('本次仅预览，未发送任何通知。正式调用时会按当时健康 Bot 重新计算。')).toBeVisible()
+    expect(within(preview).getByText('/ 2 个 Bot 可发送')).toBeVisible()
+    expect(within(preview).getByText('本次仅预览，未发送任何通知。正式调用时会按当时可用 Bot 重新计算。')).toBeVisible()
     expect(requests).toContainEqual({
       path: 'notifications/preview', method: 'POST',
       body: { company_slug: 'greenhome', target_code: 'team-a' },
@@ -672,6 +725,173 @@ describe('merged user object management', () => {
     expect(screen.queryByRole('button', { name: '生成二维码' })).not.toBeInTheDocument()
   })
 
+  it('explains that the first Weixin message initializes a newly paired Bot', async () => {
+    const activatingObject = { ...object, activating_count: 1, unhealthy_count: 0 }
+    const activatingDetail = {
+      ...detail,
+      activating_count: 1,
+      unhealthy_count: 0,
+      contacts: [{
+        ...detail.contacts[0],
+        binding: {
+          ...detail.contacts[0].binding,
+          health_status: 'unknown',
+          delivery_ready: false,
+          manual_test: { allowed: false, reason: '微信 Bot 当前不是健康状态' },
+        },
+      }],
+    }
+    installApiMock({ userObjects: [activatingObject], userObjectDetail: activatingDetail })
+    render(<GeneralPlatformApp />)
+    await openSection('用户对象')
+    await userEvent.click(await screen.findByRole('button', { name: '展开客服组详情' }))
+
+    expect(await screen.findByText('绑定：绑定成功 · 健康：待激活')).toBeVisible()
+    expect(screen.getByText(/打开刚绑定的 Bot 会话/)).toBeVisible()
+    expect(screen.getByText('待激活 1')).toBeVisible()
+    expect(screen.getByText('异常 0')).toBeVisible()
+    expect(screen.getByText('待激活')).toBeVisible()
+    expect(screen.getByRole('button', { name: '逐 Bot 安全测试' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '逐 Bot 安全测试' })).toHaveAttribute('title', expect.stringContaining('发送任意消息'))
+  })
+
+  it('keeps the QR dialog open with the one required activation step', async () => {
+    const managedObject = { ...object, all_available: false, bound_count: 0, pending_count: 1 }
+    const pendingDetail = {
+      ...managedObject,
+      contacts: [{
+        employee_id: 'employee-1', name: '员工甲', masked_phone: '138****8000', status: 'active',
+        binding_session: { id: 'session-1', employee_id: 'employee-1', status: 'pending', qr_image_url: 'qr.png' },
+      }],
+    }
+    const activatingDetail = {
+      ...managedObject,
+      bound_count: 1,
+      pending_count: 0,
+      activating_count: 1,
+      unhealthy_count: 0,
+      contacts: [{
+        employee_id: 'employee-1', name: '员工甲', masked_phone: '138****8000', status: 'active',
+        binding: {
+          binding_id: 'binding-1', status: 'bound', health_status: 'unknown', delivery_ready: false,
+          manual_test: { allowed: false, reason: '请先在微信 Bot 会话中发送任意消息完成会话初始化' },
+        },
+        binding_session: { id: 'session-1', employee_id: 'employee-1', status: 'bound' },
+      }],
+    }
+    const { requests } = installApiMock({
+      userObjects: [managedObject],
+      userObjectDetail: pendingDetail,
+      userObjectDetailAfterBindingPoll: activatingDetail,
+      bindingPoll: { id: 'session-1', employee_id: 'employee-1', status: 'bound', delivery_ready: false },
+    })
+    render(<GeneralPlatformApp />)
+    await openSection('用户对象')
+    await userEvent.click(await screen.findByRole('button', { name: '展开客服组详情' }))
+    await userEvent.click(await screen.findByRole('button', { name: '查看二维码' }))
+
+    expect(await screen.findByText('扫码确认成功，还差一步', {}, { timeout: 3500 })).toBeVisible()
+    expect(screen.getByText(/收到“微信 Bot 绑定成功”通知后即可使用/)).toBeVisible()
+    expect(await screen.findByText('绑定：绑定成功 · 健康：待激活')).toBeVisible()
+    expect(screen.getByRole('button', { name: '逐 Bot 安全测试' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '收起客服组详情' })).toBeVisible()
+    expect(requests.filter(request => request.path === 'companies/greenhome/user-objects/team-a' && request.method === 'GET').length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('shows an in-page confirmation before deleting an object and supports cancellation', async () => {
+    const managedObject = { ...object, all_available: false }
+    const managedDetail = { ...detail, all_available: false }
+    const { requests } = installApiMock({ userObjects: [managedObject], userObjectDetail: managedDetail })
+    render(<GeneralPlatformApp />)
+    await openSection('用户对象')
+    await userEvent.click(await screen.findByRole('button', { name: '展开客服组详情' }))
+    requests.splice(0)
+
+    await userEvent.click(screen.getByRole('button', { name: '删除' }))
+    let dialog = await screen.findByRole('alertdialog', { name: '确认删除用户对象' })
+    expect(within(dialog).getByText(/历史通知记录仍会保留/)).toBeVisible()
+    expect(requests.some(request => request.method === 'DELETE')).toBe(false)
+
+    await userEvent.click(within(dialog).getByRole('button', { name: '取消' }))
+    expect(screen.queryByRole('alertdialog', { name: '确认删除用户对象' })).not.toBeInTheDocument()
+    expect(requests.some(request => request.method === 'DELETE')).toBe(false)
+
+    await userEvent.click(screen.getByRole('button', { name: '删除' }))
+    dialog = await screen.findByRole('alertdialog', { name: '确认删除用户对象' })
+    await userEvent.click(within(dialog).getByRole('button', { name: '确认删除' }))
+
+    await waitFor(() => expect(requests).toContainEqual({
+      path: 'companies/greenhome/user-objects/team-a', method: 'DELETE', body: { confirm: true },
+    }))
+    expect(await screen.findByText('用户对象已删除。')).toBeVisible()
+  })
+
+  it('shows an in-page confirmation and sends explicit confirmation when unbinding a Bot', async () => {
+    const managedObject = { ...object, all_available: false }
+    const managedDetail = { ...detail, all_available: false }
+    const { requests } = installApiMock({ userObjects: [managedObject], userObjectDetail: managedDetail })
+    render(<GeneralPlatformApp />)
+    await openSection('用户对象')
+    await userEvent.click(await screen.findByRole('button', { name: '展开客服组详情' }))
+    requests.splice(0)
+
+    await userEvent.click(screen.getByRole('button', { name: '解绑' }))
+    const dialog = await screen.findByRole('alertdialog', { name: '确认解绑微信 Bot' })
+    expect(within(dialog).getByText(/立即停止接收通知/)).toBeVisible()
+    expect(requests.some(request => request.path.endsWith('/unbind'))).toBe(false)
+    await userEvent.click(within(dialog).getByRole('button', { name: '确认解绑' }))
+
+    await waitFor(() => expect(requests).toContainEqual({
+      path: 'companies/greenhome/user-objects/team-a/contacts/employee-1/unbind',
+      method: 'POST', body: { confirm: true },
+    }))
+    expect(await screen.findByText('Bot 已解绑，历史记录已保留。')).toBeVisible()
+    expect(screen.getByRole('button', { name: '收起客服组详情' })).toBeVisible()
+    expect(requests.filter(request => request.path === 'companies/greenhome/user-objects/team-a' && request.method === 'GET')).toHaveLength(1)
+  })
+
+  it('keeps the current object expanded after removing a contact', async () => {
+    const managedObject = { ...object, all_available: false }
+    const managedDetail = { ...detail, all_available: false }
+    const { requests } = installApiMock({ userObjects: [managedObject], userObjectDetail: managedDetail })
+    render(<GeneralPlatformApp />)
+    await openSection('用户对象')
+    await userEvent.click(await screen.findByRole('button', { name: '展开客服组详情' }))
+    requests.splice(0)
+
+    await userEvent.click(screen.getByRole('button', { name: '从当前对象移除' }))
+    const dialog = await screen.findByRole('alertdialog', { name: '确认移除联系人' })
+    await userEvent.click(within(dialog).getByRole('button', { name: '确认移除' }))
+
+    await waitFor(() => expect(requests).toContainEqual({
+      path: 'companies/greenhome/user-objects/team-a/contacts/employee-1',
+      method: 'DELETE', body: { confirm: true },
+    }))
+    expect(await screen.findByText('联系人已从当前对象移除。')).toBeVisible()
+    expect(screen.getByRole('button', { name: '收起客服组详情' })).toBeVisible()
+    expect(requests.filter(request => request.path === 'companies/greenhome/user-objects/team-a' && request.method === 'GET')).toHaveLength(1)
+  })
+
+  it('uses an in-page confirmation before a per-Bot safety test', async () => {
+    const managedObject = { ...object, all_available: false }
+    const managedDetail = { ...detail, all_available: false }
+    const { requests } = installApiMock({ userObjects: [managedObject], userObjectDetail: managedDetail })
+    render(<GeneralPlatformApp />)
+    await openSection('用户对象')
+    await userEvent.click(await screen.findByRole('button', { name: '展开客服组详情' }))
+    requests.splice(0)
+
+    await userEvent.click(screen.getByRole('button', { name: '逐 Bot 安全测试' }))
+    const dialog = await screen.findByRole('alertdialog', { name: '确认发送安全测试' })
+    expect(requests.some(request => request.path.endsWith('/test-notification'))).toBe(false)
+    await userEvent.click(within(dialog).getByRole('button', { name: '确认发送' }))
+
+    await waitFor(() => expect(requests).toContainEqual({
+      path: 'employees/employee-1/test-notification', method: 'POST', body: undefined,
+    }))
+    expect(await screen.findByText('安全测试仅在隔离环境模拟，未发送微信。')).toBeVisible()
+  })
+
   it('sends explicit server confirmation when deactivating a user object', async () => {
     const managedObject = { ...object, all_available: false }
     const managedDetail = { ...detail, all_available: false }
@@ -680,6 +900,8 @@ describe('merged user object management', () => {
     await openSection('用户对象')
     await userEvent.click(await screen.findByRole('button', { name: '展开客服组详情' }))
     await userEvent.click(await screen.findByRole('button', { name: '停用' }))
+    const dialog = await screen.findByRole('alertdialog', { name: '确认停用用户对象' })
+    await userEvent.click(within(dialog).getByRole('button', { name: '确认停用' }))
     await waitFor(() => expect(requests).toContainEqual({
       path: 'companies/greenhome/user-objects/team-a', method: 'PATCH',
       body: { enabled: false, confirm: true },
@@ -724,7 +946,7 @@ describe('merged user object management', () => {
       path: 'companies/greenhome/user-objects/team-a/contacts', method: 'POST',
       body: { name: '员工乙', phone: '13900001111' },
     }))
-    await userEvent.click(screen.getByRole('button', { name: '展开客服组详情' }))
+    expect(screen.getByRole('button', { name: '收起客服组详情' })).toBeVisible()
     await screen.findByRole('button', { name: '绑定全部可用 Bot' })
     await userEvent.click(screen.getByRole('button', { name: '绑定全部可用 Bot' }))
     expect(requests.some(r => r.path.endsWith('/bind-all') && r.method === 'POST')).toBe(true)

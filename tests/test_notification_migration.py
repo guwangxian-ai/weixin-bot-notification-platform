@@ -76,9 +76,7 @@ def test_notification_migration_preserves_historical_video_delivery(tmp_path: Pa
         row = connection.execute(
             "SELECT video_asset_id, title, body, status FROM deliveries WHERE id = 'delivery-1'"
         ).fetchone()
-        columns = {
-            item[1]: item[3] for item in connection.execute("PRAGMA table_info(deliveries)")
-        }
+        columns = {item[1]: item[3] for item in connection.execute("PRAGMA table_info(deliveries)")}
         historical_claim = connection.execute(
             "SELECT claimed_delivery_id, consumed_at FROM video_assets WHERE id = 'asset-2'"
         ).fetchone()
@@ -125,6 +123,56 @@ def test_binding_notification_migration_preserves_existing_rows(tmp_path: Path) 
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     assert delivery == ("business", None)
     assert "last_manual_test_at" in binding_columns
+
+
+def test_direct_delivery_migration_backfills_active_binding_owner_target(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "direct-delivery.db"
+    run_alembic(database, "2c4e6a8b0d12")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """INSERT INTO companies
+            (id, name, enabled, created_at, slug, deleted_at, updated_at)
+            VALUES ('tenant', '测试租户', 1, CURRENT_TIMESTAMP, 'tenant', NULL,
+                    CURRENT_TIMESTAMP)"""
+        )
+        connection.execute(
+            """INSERT INTO employees
+            (id, company_id, name, department, content_vertical, secondary_topics,
+             target_platforms, account_name, tone, video_duration_seconds,
+             publishing_frequency, status, created_at, updated_at)
+            VALUES ('employee', 'tenant', '历史员工', '', '', '[]', '[]', '', '',
+                    60, '', 'ACTIVE', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"""
+        )
+        connection.execute(
+            """INSERT INTO weixin_bot_accounts
+            (id, company_id, account_fingerprint, account_id_encrypted,
+             bot_token_encrypted, base_url_encrypted, owner_user_id_encrypted,
+             account_id_masked, health_status, created_at, updated_at)
+            VALUES ('bot', 'tenant', 'fingerprint', 'account-encrypted',
+                    'token-encrypted', 'base-encrypted', 'owner-encrypted',
+                    'bot***id', 'UNKNOWN', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"""
+        )
+        connection.execute(
+            """INSERT INTO employee_bot_bindings
+            (id, company_id, employee_id, bot_account_id, active, bound_at,
+             context_token_encrypted, chat_id_encrypted)
+            VALUES ('binding', 'tenant', 'employee', 'bot', 1, CURRENT_TIMESTAMP,
+                    NULL, NULL)"""
+        )
+        connection.commit()
+
+    run_alembic(database, "head")
+
+    with sqlite3.connect(database) as connection:
+        target = connection.execute(
+            "SELECT chat_id_encrypted FROM employee_bot_bindings WHERE id = 'binding'"
+        ).fetchone()
+        revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    assert target == ("owner-encrypted",)
+    assert revision == ("6e2f4a8c1d90",)
 
 
 def test_general_platform_migration_maps_existing_employee_and_binding_once(tmp_path: Path) -> None:
@@ -282,16 +330,14 @@ def test_general_platform_migration_maps_existing_employee_and_binding_once(tmp_
         connection.rollback()
         with pytest.raises(sqlite3.IntegrityError, match="bot binding identity is immutable"):
             connection.execute(
-                "UPDATE employee_bot_bindings SET employee_id='employee-3' "
-                "WHERE id='binding-1'"
+                "UPDATE employee_bot_bindings SET employee_id='employee-3' WHERE id='binding-1'"
             )
         connection.rollback()
         with pytest.raises(
             sqlite3.IntegrityError, match="notification target employee tenant mismatch"
         ):
             connection.execute(
-                "UPDATE notification_targets SET employee_id='employee-2' "
-                "WHERE id='employee-1'"
+                "UPDATE notification_targets SET employee_id='employee-2' WHERE id='employee-1'"
             )
         connection.rollback()
         with pytest.raises(sqlite3.IntegrityError, match="target member tenant mismatch"):
@@ -305,9 +351,7 @@ def test_general_platform_migration_maps_existing_employee_and_binding_once(tmp_
             )
         connection.rollback()
         with pytest.raises(sqlite3.IntegrityError, match="delivery platform tenant mismatch"):
-            connection.execute(
-                "UPDATE deliveries SET target_id='target-2' WHERE id='delivery-1'"
-            )
+            connection.execute("UPDATE deliveries SET target_id='target-2' WHERE id='delivery-1'")
         connection.rollback()
         with pytest.raises(sqlite3.IntegrityError, match="delivery platform tenant mismatch"):
             connection.execute(

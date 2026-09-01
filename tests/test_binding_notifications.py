@@ -6,7 +6,14 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app.ilink_binding import IlinkLoginResult, IlinkStatus
-from app.models import AuditLog, Delivery, DeliveryStatus, EmployeeBotBinding
+from app.models import (
+    AuditLog,
+    BotHealthStatus,
+    Delivery,
+    DeliveryStatus,
+    EmployeeBotBinding,
+    WeixinBotAccount,
+)
 from tests.test_binding import create_employee, login
 from tests.test_bot_binding_sessions import qr_ticket
 from tests.test_rbac import create_user, relogin
@@ -97,7 +104,55 @@ def test_binding_welcome_is_tenant_branded_and_once_per_binding_event(
     assert log["notification_type"] == "binding_welcome"
 
 
-def test_welcome_failure_does_not_rollback_binding_and_manual_test_remains_available(
+def test_qr_confirmation_waits_then_first_inbound_sends_welcome_with_context(
+    client: TestClient, monkeypatch
+) -> None:
+    csrf = login(client)
+    settings = client.app.state.settings
+    object.__setattr__(settings, "delivery_mode", "weixin")
+    calls: list[tuple[str, str | None]] = []
+
+    from app.weixin_delivery import SendOutcome
+
+    def fake_send(*args, **_kwargs):
+        calls.append((args[4], args[7]))
+        return SendOutcome(True, "welcome-message", False)
+
+    monkeypatch.setattr("app.weixin_delivery.send_video", fake_send)
+    with patch("app.ilink_binding.IlinkQrAdapter.create", return_value=qr_ticket("direct")):
+        employee = create_employee(client, csrf, "greenhome")
+    with patch("app.ilink_binding.IlinkQrAdapter.poll", return_value=confirmed("direct-bot")):
+        response = client.post(
+            f"/api/v1/binding-sessions/{employee['binding_session']['id']}/poll",
+            headers={"X-CSRF-Token": csrf},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "bound"
+    assert response.json()["delivery_ready"] is False
+    assert calls == []
+    activated = client.post(
+        "/api/v1/bot/inbound",
+        headers={"X-Bot-Secret": "test-bot-webhook-secret-123456789"},
+        json={
+            "account_id": "direct-bot",
+            "user_id": "owner-direct-bot",
+            "chat_id": "chat-direct-bot",
+            "text": "帮助",
+            "context_token": "direct-context",
+        },
+    )
+    assert activated.status_code == 200
+    assert activated.json()["reply"] is False
+    assert calls == [("chat-direct-bot", "direct-context")]
+    detail = client.get(f"/api/v1/employees/{employee['id']}").json()
+    assert detail["binding"]["delivery_ready"] is True
+    assert detail["binding"]["health_status"] == "healthy"
+    assert detail["binding"]["welcome_delivery"]["status"] == "sent"
+    assert detail["binding"]["manual_test"]["allowed"] is True
+
+
+def test_welcome_failure_does_not_rollback_binding_but_marks_channel_degraded(
     client: TestClient, monkeypatch
 ) -> None:
     csrf = login(client)
@@ -116,9 +171,9 @@ def test_welcome_failure_does_not_rollback_binding_and_manual_test_remains_avail
 
     detail = client.get(f"/api/v1/employees/{employee['id']}").json()
     assert detail["binding"]["status"] == "bound"
-    assert detail["binding"]["health_status"] == "healthy"
+    assert detail["binding"]["health_status"] == "degraded"
     assert detail["binding"]["welcome_delivery"]["status"] == "failed"
-    assert detail["binding"]["manual_test"]["allowed"] is True
+    assert detail["binding"]["manual_test"]["allowed"] is False
 
 
 def test_manual_test_is_fixed_purpose_audited_logged_and_cooled_down(
@@ -167,7 +222,9 @@ def test_concurrent_manual_test_claims_cooldown_once(client: TestClient) -> None
         assert database.query(Delivery).filter_by(notification_type="manual_test").count() == 1
 
 
-def test_manual_test_requires_healthy_active_binding_admin_and_tenant(client: TestClient) -> None:
+def test_manual_test_requires_initialized_binding_and_enforces_health_admin_and_tenant(
+    client: TestClient,
+) -> None:
     root_csrf = login(client)
     with patch("app.ilink_binding.IlinkQrAdapter.create", return_value=qr_ticket("not-ready")):
         not_ready = create_employee(client, root_csrf, "greenhome")
@@ -176,12 +233,38 @@ def test_manual_test_requires_healthy_active_binding_admin_and_tenant(client: Te
             f"/api/v1/binding-sessions/{not_ready['binding_session']['id']}/poll",
             headers={"X-CSRF-Token": root_csrf},
         )
+    not_initialized = client.post(
+        f"/api/v1/employees/{not_ready['id']}/test-notification",
+        headers={"X-CSRF-Token": root_csrf},
+    )
+    assert not_initialized.status_code == 409
+    assert "发送任意消息" in not_initialized.json()["detail"]
+
+    activated = client.post(
+        "/api/v1/bot/inbound",
+        headers={"X-Bot-Secret": "test-bot-webhook-secret-123456789"},
+        json={
+            "account_id": "not-ready-bot",
+            "user_id": "owner-not-ready-bot",
+            "chat_id": "chat-not-ready-bot",
+            "text": "帮助",
+            "context_token": "not-ready-context",
+        },
+    )
+    assert activated.status_code == 200
+
+    with client.app.state.session_factory() as database:
+        binding = database.query(EmployeeBotBinding).filter_by(employee_id=not_ready["id"]).one()
+        account = database.get(WeixinBotAccount, binding.bot_account_id)
+        assert account is not None
+        account.health_status = BotHealthStatus.DEGRADED
+        database.commit()
     blocked = client.post(
         f"/api/v1/employees/{not_ready['id']}/test-notification",
         headers={"X-CSRF-Token": root_csrf},
     )
     assert blocked.status_code == 409
-    assert "健康" in blocked.json()["detail"] or "会话" in blocked.json()["detail"]
+    assert "不可用" in blocked.json()["detail"]
 
     sanlin = bind_and_activate(client, root_csrf, company_id="sanlin", account="sanlin-admin-bot")
     create_user(client, root_csrf, "green-admin-test-send", "company_admin", "greenhome")
